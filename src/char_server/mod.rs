@@ -1,7 +1,5 @@
-use std::char;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::str::from_utf8;
 use std::thread;
 
 fn handle_client(mut stream: TcpStream) {

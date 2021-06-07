@@ -1,8 +1,5 @@
-use std::char;
 use std::io::{Read, Write};
-use std::net::Ipv4Addr;
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::str::from_utf8;
 use std::thread;
 
 fn handle_client(mut stream: TcpStream) {
@@ -16,9 +13,9 @@ fn handle_client(mut stream: TcpStream) {
       let command = &data[0..2];
       match command {
         [0xcf, 0xa] => {
-          let packet_size = &data[2..4];
-          let username = &data[6..30];
-          let password_hash = &data[30..];
+          let _packet_size = &data[2..4];
+          let _username = &data[6..30];
+          let _password_hash = &data[30..];
 
           let mut login_result = [0 as u8; 3];
 
