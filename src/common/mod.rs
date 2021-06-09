@@ -45,4 +45,13 @@ impl WritablePacket {
       pos += 1;
     }
   }
+
+  pub fn write_bytes(&mut self, b: &[u8], mut pos: usize) {
+    let mut bytes = vec![0u8; b.len()];
+    bytes[0..b.len()].copy_from_slice(&b[..]);
+    for byte in bytes {
+      self.data[pos] = byte;
+      pos += 1;
+    }
+  }
 }
