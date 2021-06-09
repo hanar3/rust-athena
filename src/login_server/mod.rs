@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
+use crate::common::WritablePacket;
 fn handle_client(mut stream: TcpStream) {
   let mut data = [0 as u8; 100];
   while match stream.read(&mut data) {
@@ -16,7 +17,6 @@ fn handle_client(mut stream: TcpStream) {
           let _packet_size = &data[2..4];
           let _username = &data[6..30];
           let _password_hash = &data[30..];
-
           let mut login_result = [0 as u8; 3];
 
           // Server closed result
