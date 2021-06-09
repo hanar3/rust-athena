@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
-use crate::common::WritablePacket;
+use crate::common::packets::WritablePacket;
 fn handle_client(mut stream: TcpStream) {
   let mut data = [0 as u8; 100];
   while match stream.read(&mut data) {
@@ -24,7 +24,6 @@ fn handle_client(mut stream: TcpStream) {
           // Server closed packet
           // packet.write_word(0x8100, 0);
           // packet.write_byte(0x01, 2);
-          // stream.write(&packet.data.borrow_mut()).unwrap();
 
           let mut packet = WritablePacket::create(34);
 
@@ -59,7 +58,7 @@ fn handle_client(mut stream: TcpStream) {
           packet.write_bytes(&random_bytes, 47); // web auth token
           packet.write_long(0x0100007F, 64); // charserver ip
           packet.write_word(0x017E9, 68); // charserver port
-          packet.write_str("RustServer", 70); // charserver name
+          packet.write_str("Rust Athena", 70); // charserver name
 
           stream.write(&packet.data).unwrap();
         }
