@@ -1,44 +1,47 @@
-use std::cell::RefCell;
+extern crate byteorder;
+use byteorder::{LittleEndian, WriteBytesExt};
+use std::boxed::Box;
 
 #[derive(Debug)]
 pub struct WritablePacket {
-  pub data: RefCell<Vec<u8>>,
+  pub data: Box<[u8]>,
 }
-
 impl WritablePacket {
-  pub fn create() -> WritablePacket {
-    WritablePacket {
-      data: RefCell::new(Vec::new()),
-    }
+  pub fn create(size: usize) -> WritablePacket {
+    return WritablePacket {
+      data: vec![0 as u8; size].into_boxed_slice(),
+    };
   }
 
-  pub fn write_byte(&self, byte: u8, pos: usize) {
-    self.data.borrow_mut().insert(pos, byte);
+  pub fn write_byte(&mut self, byte: u8, pos: usize) {
+    self.data[pos] = byte;
   }
 
-  pub fn write_word(&mut self, word: u16, mut pos: usize) -> [u8; 2] {
-    let bytes = word.to_be_bytes();
+  pub fn write_word(&mut self, word: u16, mut pos: usize) {
+    let mut bytes = vec![];
+    bytes.write_u16::<LittleEndian>(word).unwrap();
+
     for byte in bytes {
-      self.data.borrow_mut().insert(pos, byte);
-      pos += 1;
-    }
-    bytes
-  }
-
-  pub fn write_long(&self, long: u32, mut pos: usize) {
-    let bytes = long.to_be_bytes();
-    println!("{:x?} ", bytes);
-    for byte in bytes {
-      self.data.borrow_mut().insert(pos, byte);
+      self.data[pos] = byte;
       pos += 1;
     }
   }
 
-  pub fn write_str(&self, string: &str, mut pos: usize) {
-    let bytes = string.as_bytes();
+  pub fn write_long(&mut self, long: u32, mut pos: usize) {
+    let mut bytes = vec![];
+    bytes.write_u32::<LittleEndian>(long).unwrap();
+    for byte in bytes {
+      self.data[pos] = byte;
+      pos += 1;
+    }
+  }
+
+  pub fn write_str(&mut self, s: &str, mut pos: usize) {
+    let mut bytes = vec![0u8; s.len()];
+    bytes[0..s.len()].copy_from_slice(s.as_bytes());
 
     for byte in bytes {
-      self.data.borrow_mut().insert(pos, *byte);
+      self.data[pos] = byte;
       pos += 1;
     }
   }

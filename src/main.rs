@@ -10,10 +10,6 @@ fn main() {
     panic!("Must specify a server argument");
   }
 
-  let mut packet = common::WritablePacket::create();
-  packet.write_word(0xdc01, 0);
-  packet.write_long(100000001, 0);
-
   let server: &str = &args[1];
 
   match server {

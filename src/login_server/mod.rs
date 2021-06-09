@@ -19,19 +19,19 @@ fn handle_client(mut stream: TcpStream) {
           let _password_hash = &data[30..];
           let mut login_result = [0 as u8; 3];
 
-          // Server closed result
-          login_result[0] = 0x81; // command
-          login_result[1] = 0x00; // command
-          login_result[2] = 0x01;
+          // Server closed packet
+          // packet.write_word(0x8100, 0);
+          // packet.write_byte(0x01, 2);
+          // stream.write(&packet.data.borrow_mut()).unwrap();
 
-          // AC_ACCEPT_LOGIN3
-          let accept_login = [
-            0xe3, 0x0a, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x53, 0x31, 0x30, 0x30, 0x30, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x00,
-          ];
+          let mut packet = WritablePacket::create(34);
 
-          stream.write(&accept_login).unwrap();
+          packet.write_word(0x0ae3, 0); // ACCEPT_LOGIN command
+          packet.write_word(34, 2); // Packet size
+          packet.write_long(0, 4); // Unknown
+          packet.write_str("S1000", 8);
+          packet.write_str("token", 28);
+          stream.write(&packet.data).unwrap();
         }
         [0xdb, 0x01] => {
           // logclif_parse_reqkey
