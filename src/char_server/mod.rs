@@ -2,6 +2,8 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
+use crate::common::packets::{ReadablePacket, WritablePacket};
+
 fn handle_client(mut stream: TcpStream) {
   let mut data = [0 as u8; 100];
   while match stream.read(&mut data) {
@@ -13,7 +15,16 @@ fn handle_client(mut stream: TcpStream) {
       let command = &data[0..2];
       match command {
         [0x65, 0x00] => {
-          println!("char_req_connect!");
+          let read_packet = ReadablePacket::create(&data);
+          let account_id: u32 = read_packet.read_long(2);
+          let login_id1: u32 = read_packet.read_long(6);
+          let login_id2: u32 = read_packet.read_long(10);
+          let account_sex: u8 = read_packet.read_byte(16);
+
+          println!(
+            "Request connect - account_id {}, login_id1 {}, login_id2 {}, sex {}",
+            account_id, login_id1, login_id2, account_sex
+          );
 
           let char_req_connect = [
             0x80, 0x84, 0x1e, 0x00, 0x2d, 0x08, 0x1d, 0x00, 0x0f, 0x00, 0x00, 0x0f, 0x0f, 0x00,
