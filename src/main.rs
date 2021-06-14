@@ -11,7 +11,6 @@ fn main() {
   }
 
   let server: &str = &args[1];
-
   match server {
     "--server=char" => {
       char_server::do_init();

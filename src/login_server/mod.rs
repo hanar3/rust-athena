@@ -50,9 +50,9 @@ fn handle_client(mut stream: TcpStream) {
 
           packet.write_word(0x0ac4, 0); // Packet ID
           packet.write_word(0x00E0, 2); // Packet size
-          packet.write_long(1001, 4); // Login id1
-          packet.write_long(1002, 8); // account id
-          packet.write_long(1003, 12); // login id2
+          packet.write_long(2000000, 4); // Login id1
+          packet.write_long(2000000, 8); // account id
+          packet.write_long(2000000, 12); // login id2
           packet.write_long(0, 16); // Unknown
           packet.write_byte(1, 46); // account sex
           packet.write_bytes(&web_auth_token, 47); // web auth token

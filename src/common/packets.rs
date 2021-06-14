@@ -37,6 +37,15 @@ impl WritablePacket {
     }
   }
 
+  pub fn write_longlong(&mut self, ll: u64, mut pos: usize) {
+    let mut bytes = vec![];
+    bytes.write_u64::<LittleEndian>(ll).unwrap();
+    for byte in bytes {
+      self.data[pos] = byte;
+      pos += 1;
+    }
+  }
+
   pub fn write_str(&mut self, s: &str, mut pos: usize) {
     let mut bytes = vec![0u8; s.len()];
     bytes[0..s.len()].copy_from_slice(s.as_bytes());
