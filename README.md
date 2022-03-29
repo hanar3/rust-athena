@@ -6,4 +6,5 @@ The server also creates a default character.
 
 ## Tooling
 [Wireshark](https://www.wireshark.org/) - Monitor client-server communication.
+
 [WARP](https://github.com/Neo-Mind/WARP) - Used to disable packet encryption on client-side
