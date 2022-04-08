@@ -5,7 +5,7 @@ Ragnarok Online login and char servers reimplemented in rust
 The server also creates a default character.
 
 ## Tooling
-[Wireshark](https://www.wireshark.org/) - Monitor client-server communication.
+[Wireshark](https://www.wireshark.org/) - Monitor network protocol
 
 [WARP](https://github.com/Neo-Mind/WARP) - Disable packet encryption on client-side
 
