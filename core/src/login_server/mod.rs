@@ -45,6 +45,24 @@ fn handle_client(mut stream: TcpStream) {
           stream.write(&packet.data).unwrap();
         }
         [0xdd, 0x01] => {
+          // let mut packet = WritablePacket::create(224);
+          // let web_auth_token = rand::thread_rng().gen::<[u8; 17]>();
+
+          // packet.write_word(0x0ac4, 0); // Packet ID
+          // packet.write_word(0x00E0, 2); // Packet size
+          // packet.write_long(2000000, 4); // Login id1
+          // packet.write_long(2000000, 8); // account id
+          // packet.write_long(2000000, 12); // login id2
+          // packet.write_long(0, 16); // Unknown
+          // packet.write_byte(1, 46); // account sex
+          // packet.write_bytes(&web_auth_token, 47); // web auth token
+          // packet.write_long(0x0100007F, 64); // charserver ip
+          // packet.write_word(0x017E9, 68); // charserver port
+          // packet.write_str("Rust Athena", 70); // charserver name
+
+          // stream.write(&packet.data).unwrap();
+        }
+        [0x64, 0x0] => {
           let mut packet = WritablePacket::create(224);
           let web_auth_token = rand::thread_rng().gen::<[u8; 17]>();
 

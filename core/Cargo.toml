@@ -1,0 +1,17 @@
+[package]
+name = "rust-athena"
+version = "0.1.0"
+edition = "2018"
+default-run = "rust-athena"
+
+[[bin]]
+name = "rust-athena"
+path = "src/main.rs"
+
+[dependencies]
+dotenv = "0.15.0"
+byteorder = "1.4.3"
+md5 = "0.7.0"
+rand = "0.8.3"
+diesel = { version = "1.4.8", features = ["mysql"] }
+rust-athena-db = { path = "../db" }

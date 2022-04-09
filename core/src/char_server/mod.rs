@@ -2,11 +2,8 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
+use crate::common::context::ServerContext;
 use crate::common::packets::{ReadablePacket, WritablePacket};
-
-const MAX_CHARS: usize = 15;
-const MAX_CHAR_BUF: usize = 150;
-const OFFSET: usize = 27;
 
 fn handle_client(mut stream: TcpStream) {
   let mut data = [0 as u8; 100];
