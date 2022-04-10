@@ -2,7 +2,6 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
-use crate::common::context::ServerContext;
 use crate::common::packets::{ReadablePacket, WritablePacket};
 
 fn handle_client(mut stream: TcpStream) {

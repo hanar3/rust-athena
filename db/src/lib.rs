@@ -26,10 +26,9 @@ lazy_static! {
 }
 
 pub fn connection() -> Result<DbConnection, diesel::ConnectionError> {
-  let err = diesel::ConnectionError::BadConnection("Failed to get db connection".to_string());
   POOL
     .get()
-    .map_err(|e| diesel::ConnectionError::BadConnection("Failed to get db connection".to_string()));
+    .map_err(|e| diesel::ConnectionError::BadConnection("Failed to get db connection".to_string()))
 }
 
 pub fn init() {
