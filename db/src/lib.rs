@@ -28,7 +28,7 @@ lazy_static! {
 pub fn connection() -> Result<DbConnection, diesel::ConnectionError> {
   POOL
     .get()
-    .map_err(|e| diesel::ConnectionError::BadConnection("Failed to get db connection".to_string()))
+    .map_err(|e| diesel::ConnectionError::BadConnection(e.to_string()))
 }
 
 pub fn init() {

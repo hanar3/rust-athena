@@ -1,10 +1,29 @@
+extern crate diesel;
+extern crate serde_derive;
+extern crate serde_json;
 use md5;
 use rand::Rng;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use rust_athena_db::models::User;
+use rust_athena_db::schema::users;
+use rust_athena_db::schema::users::dsl::*;
+
 use std::thread;
+use diesel::prelude::*;
+use diesel::{Insertable};
+use serde::{Deserialize, Serialize};
 
 use crate::common::packets::WritablePacket;
+
+#[derive(Serialize, Deserialize, Insertable)]
+#[table_name = "users"]
+pub struct UserForm{
+  pub username:  String,
+  pub password_hash:  String,
+  pub email:  String,
+}
+
 fn handle_client(mut stream: TcpStream) {
   let mut data = [0 as u8; 100];
   while match stream.read(&mut data) {
@@ -106,7 +125,17 @@ fn handle_client(mut stream: TcpStream) {
 
 pub fn do_init() {
   let listener = TcpListener::bind("0.0.0.0:6900").unwrap();
-  println!("Login server is listening on port 6900");
+  let conn = rust_athena_db::connection().unwrap();
+
+
+  let user_form = UserForm{
+    username: "s1".to_string(),
+    password_hash: "p1".to_string(),
+    email: "a@a.com".to_string(),
+  };
+
+  let query = diesel::insert_or_ignore_into(users::table).values(&user_form).execute(&conn).unwrap();
+  println!("Login server is listening on port 6900 -- MYSQL Listening on port 3306");
 
   for stream in listener.incoming() {
     match stream {

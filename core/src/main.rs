@@ -7,7 +7,6 @@ mod char_server;
 mod login_server;
 
 fn main() {
-  println!("DB Connection established");
   let args: Vec<String> = env::args().collect();
   if args.len() < 2 {
     panic!("Must specify a server argument");
