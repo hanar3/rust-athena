@@ -269,9 +269,151 @@ pub fn character_selection_refused(owned_slot: bool) -> [u8; 3] {
     [0xca, 0x02, if owned_slot { 4 } else { 0 }]
 }
 
+pub struct MapEntry {
+    pub account: u32,
+    pub character: u32,
+    pub auth_code: u32,
+    pub sex: u8,
+}
+
+pub fn map_destination(
+    character: u32,
+    map: &[u8],
+    endpoint: SocketAddrV4,
+) -> io::Result<[u8; 156]> {
+    let mut reply = [0; 156];
+    reply[..2].copy_from_slice(&0x0ac5u16.to_le_bytes());
+    reply[2..6].copy_from_slice(&character.to_le_bytes());
+    // Match rAthena's extended map name, including ".gat" and NUL padding.
+    write_field(&mut reply[6..22], map, "map name")?;
+    reply[22..26].copy_from_slice(&endpoint.ip().octets());
+    reply[26..28].copy_from_slice(&endpoint.port().to_le_bytes());
+    Ok(reply)
+}
+
+pub fn read_map_entry(reader: &mut impl Read) -> io::Result<MapEntry> {
+    let id = read_id(reader)?;
+    if id != 0x0436 {
+        return Err(unsupported("map entry", id));
+    }
+    let mut body = [0; 21];
+    reader.read_exact(&mut body)?;
+    Ok(MapEntry {
+        account: u32::from_le_bytes(body[..4].try_into().unwrap()),
+        character: u32::from_le_bytes(body[4..8].try_into().unwrap()),
+        auth_code: u32::from_le_bytes(body[8..12].try_into().unwrap()),
+        sex: body[20],
+    })
+}
+
+pub fn map_account_ack(account: u32) -> [u8; 6] {
+    let mut reply = [0; 6];
+    reply[..2].copy_from_slice(&0x0283u16.to_le_bytes());
+    reply[2..].copy_from_slice(&account.to_le_bytes());
+    reply
+}
+
+pub fn map_entry_refused() -> [u8; 3] {
+    [0x74, 0, 1]
+}
+
+pub fn map_accepted(tick: u32, x: u16, y: u16, direction: u8) -> [u8; 13] {
+    debug_assert!(x < 1024 && y < 1024 && direction < 8);
+    let mut reply = [0; 13];
+    reply[..2].copy_from_slice(&0x02ebu16.to_le_bytes());
+    reply[2..6].copy_from_slice(&tick.to_le_bytes());
+    reply[6] = (x >> 2) as u8;
+    reply[7] = ((x & 3) << 6 | y >> 4) as u8;
+    reply[8] = ((y & 15) << 4) as u8 | direction;
+    reply[9..11].fill(5);
+    reply
+}
+
+pub enum MapRequest {
+    Loaded,
+    SyncTime,
+    Ping,
+    ConfirmLoad,
+}
+
+pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
+    match read_id(reader)? {
+        0x007d => Ok(MapRequest::Loaded),
+        0x0360 => {
+            reader.read_exact(&mut [0; 4])?;
+            Ok(MapRequest::SyncTime)
+        }
+        0x0b1c => Ok(MapRequest::Ping),
+        0x0447 => Ok(MapRequest::ConfirmLoad),
+        id => Err(unsupported("map", id)),
+    }
+}
+
+pub fn map_time(tick: u32) -> [u8; 6] {
+    let mut reply = [0; 6];
+    reply[..2].copy_from_slice(&0x007fu16.to_le_bytes());
+    reply[2..].copy_from_slice(&tick.to_le_bytes());
+    reply
+}
+
+pub const MAP_LOAD_CONFIRMED: [u8; 2] = 0x0b1bu16.to_le_bytes();
+pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_acceptance_encodes_spawn_and_frames_the_load_exchange() {
+        assert_eq!(
+            map_accepted(0x12345678, 156, 191, 4),
+            [0xeb, 0x02, 0x78, 0x56, 0x34, 0x12, 0x27, 0x0b, 0xf4, 5, 5, 0, 0]
+        );
+        let mut requests: &[u8] = &[0x7d, 0, 0x60, 0x03, 1, 2, 3, 4, 0x1c, 0x0b];
+        assert!(matches!(
+            read_map_request(&mut requests).unwrap(),
+            MapRequest::Loaded
+        ));
+        assert!(matches!(
+            read_map_request(&mut requests).unwrap(),
+            MapRequest::SyncTime
+        ));
+        assert!(matches!(
+            read_map_request(&mut requests).unwrap(),
+            MapRequest::Ping
+        ));
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn map_handoff_uses_rodecomp_packet_layout() {
+        let endpoint = "192.0.2.15:5121".parse().unwrap();
+        let destination = map_destination(150_001, b"prontera.gat", endpoint).unwrap();
+        assert_eq!(&destination[..6], &[0xc5, 0x0a, 0xf1, 0x49, 0x02, 0]);
+        assert_eq!(&destination[6..22], b"prontera.gat\0\0\0\0");
+        assert_eq!(&destination[22..28], &[192, 0, 2, 15, 1, 20]);
+        assert_eq!(&destination[28..], &[0; 128]);
+
+        let mut packet = [0; 23];
+        packet[..14].copy_from_slice(&[
+            0x36, 0x04, 0x80, 0x84, 0x1e, 0, 0xf1, 0x49, 0x02, 0, 1, 2, 3, 0x80,
+        ]);
+        packet[14..22].fill(0xff);
+        packet[22] = 1;
+        let entry = read_map_entry(&mut packet.as_slice()).unwrap();
+        assert_eq!(
+            (entry.account, entry.character, entry.auth_code, entry.sex),
+            (2_000_000, 150_001, 0x8003_0201, 1)
+        );
+        assert_eq!(
+            map_account_ack(entry.account),
+            [0x83, 0x02, 0x80, 0x84, 0x1e, 0]
+        );
+        assert_eq!(
+            read_map_entry(&mut &packet[..22]).err().unwrap().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
 
     #[test]
     fn character_page_matches_capture_and_handles_terminal_pages() {

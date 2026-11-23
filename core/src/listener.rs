@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Read};
 use std::net::{SocketAddrV4, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -67,4 +67,10 @@ impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         *self.0.lock().unwrap() -= 1;
     }
+}
+
+/// Allow the client to read the last reply before it closes its connection.
+pub fn drain(stream: TcpStream) -> Result<()> {
+    io::copy(&mut stream.take(4096), &mut io::sink())?;
+    Ok(())
 }

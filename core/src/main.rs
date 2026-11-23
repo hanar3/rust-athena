@@ -1,6 +1,7 @@
 mod char_server;
 mod listener;
 mod login_server;
+mod map_server;
 mod protocol;
 
 use std::env;
@@ -42,11 +43,18 @@ fn run() -> Result<()> {
             login_server::serve(database()?, bind, destination, name)
         }
         [command] if command == "char" => {
-            char_server::serve(database()?, address("ATHENA_CHAR_BIND", "127.0.0.1:6121")?)
+            let destination = address("ATHENA_MAP_ADVERTISE", "127.0.0.1:5121")?;
+            if destination.ip().is_unspecified() || destination.port() == 0 || destination.port() > i16::MAX as u16 {
+                return Err("ATHENA_MAP_ADVERTISE must be a concrete IPv4 endpoint with port 1–32767".into());
+            }
+            char_server::serve(database()?, address("ATHENA_CHAR_BIND", "127.0.0.1:6121")?, destination)
+        }
+        [command] if command == "map" => {
+            map_server::serve(database()?, address("ATHENA_MAP_BIND", "127.0.0.1:5121")?)
         }
         [command, username, email] if command == "register" => register(username, email),
         _ => Err(
-            "Usage: rust-athena login | char | register <username> <email> (password on stdin)"
+            "Usage: rust-athena login | char | map | register <username> <email> (password on stdin)"
                 .into(),
         ),
     }

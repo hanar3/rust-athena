@@ -5,18 +5,17 @@ use std::time::Duration;
 
 use rust_athena_db::{Character, Database, NewCharacter};
 
-use crate::{listener, protocol::v20260219 as wire, Result};
+use crate::{listener, map_server::START_MAP, protocol::v20260219 as wire, Result};
 
 const SLOTS: u8 = 15;
-const START_MAP: &str = "prontera.gat";
 
-pub fn serve(db: Database, bind: SocketAddrV4) -> Result<()> {
+pub fn serve(db: Database, bind: SocketAddrV4, map_endpoint: SocketAddrV4) -> Result<()> {
     listener::serve(bind, Duration::from_secs(90), move |stream| {
-        handle(&db, stream)
+        handle(&db, stream, map_endpoint)
     })
 }
 
-fn handle(db: &Database, mut stream: TcpStream) -> Result<()> {
+fn handle(db: &Database, mut stream: TcpStream, map_endpoint: SocketAddrV4) -> Result<()> {
     let entry = wire::read_character_entry(&mut stream)?;
     let account = entry.account;
     if !db.redeem_handoff(account, entry.login_ids, entry.sex)? {
@@ -45,8 +44,33 @@ fn handle(db: &Database, mut stream: TcpStream) -> Result<()> {
                 }
             }
             wire::CharacterRequest::Select(slot) => {
-                let owned = roster.iter().any(|character| character.slot == slot);
-                stream.write_all(&wire::character_selection_refused(owned))?;
+                let character = match roster.iter().find(|character| character.slot == slot) {
+                    Some(character) => character,
+                    None => {
+                        stream.write_all(&wire::character_selection_refused(false))?;
+                        continue;
+                    }
+                };
+                if character.map_name != START_MAP
+                    || !db.issue_map_transfer(
+                        account,
+                        character.id,
+                        entry.login_ids[0],
+                        START_MAP,
+                    )?
+                {
+                    stream.write_all(&wire::character_selection_refused(true))?;
+                    continue;
+                }
+                stream.write_all(&wire::map_destination(
+                    character.id,
+                    START_MAP.as_bytes(),
+                    map_endpoint,
+                )?)?;
+                // Rodecomp opens the map connection after reading this response.
+                // Keep the character socket open until the client closes it.
+                stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+                return listener::drain(stream);
             }
         }
     }

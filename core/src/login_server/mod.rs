@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::io::{self, Read, Write};
+use std::io::Write;
 use std::net::{SocketAddrV4, TcpStream};
 use std::time::Duration;
 
@@ -48,6 +48,5 @@ fn handle(
 
     // Rodecomp closes login after choosing a character server. Keep the reply
     // readable until then, with a bounded drain and the listener's read timeout.
-    io::copy(&mut stream.take(4096), &mut io::sink())?;
-    Ok(())
+    listener::drain(stream)
 }

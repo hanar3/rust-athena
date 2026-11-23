@@ -9,7 +9,7 @@ pub use models::{Account, Character, NewCharacter};
 use diesel::mysql::MysqlConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
-use diesel::sql_types::{BigInt, Integer, TinyInt, Unsigned};
+use diesel::sql_types::{BigInt, Integer, TinyInt, Unsigned, VarChar};
 use schema::{characters, users};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -75,6 +75,52 @@ impl Database {
         .bind::<Unsigned<Integer>, _>(ids[0])
         .bind::<Unsigned<Integer>, _>(ids[1])
         .bind::<Unsigned<TinyInt>, _>(sex)
+        .execute(&self.0.get()?)?
+            == 1)
+    }
+
+    pub fn issue_map_transfer(
+        &self,
+        account: u32,
+        character: u32,
+        auth_code: u32,
+        map: &str,
+    ) -> Result<bool> {
+        let connection = self.0.get()?;
+        diesel::sql_query("DELETE FROM map_transfers WHERE expires_at <= UTC_TIMESTAMP(6)")
+            .execute(&connection)?;
+        Ok(diesel::sql_query(
+            "INSERT INTO map_transfers (account_id, character_id, auth_code, sex, map_name, expires_at)
+             SELECT account_id, id, ?, sex, map_name, UTC_TIMESTAMP(6) + INTERVAL 60 SECOND
+             FROM characters WHERE account_id = ? AND id = ? AND map_name = ?
+             ON DUPLICATE KEY UPDATE character_id = VALUES(character_id),
+                 auth_code = VALUES(auth_code), sex = VALUES(sex), map_name = VALUES(map_name),
+                 expires_at = VALUES(expires_at)",
+        )
+        .bind::<Unsigned<Integer>, _>(auth_code)
+        .bind::<BigInt, _>(i64::from(account))
+        .bind::<Unsigned<Integer>, _>(character)
+        .bind::<VarChar, _>(map)
+        .execute(&connection)? != 0)
+    }
+
+    pub fn redeem_map_transfer(
+        &self,
+        account: u32,
+        character: u32,
+        auth_code: u32,
+        sex: u8,
+        map: &str,
+    ) -> Result<bool> {
+        Ok(diesel::sql_query(
+            "DELETE FROM map_transfers WHERE account_id = ? AND character_id = ?
+             AND auth_code = ? AND sex = ? AND map_name = ? AND expires_at > UTC_TIMESTAMP(6)",
+        )
+        .bind::<BigInt, _>(i64::from(account))
+        .bind::<Unsigned<Integer>, _>(character)
+        .bind::<Unsigned<Integer>, _>(auth_code)
+        .bind::<Unsigned<TinyInt>, _>(sex)
+        .bind::<VarChar, _>(map)
         .execute(&self.0.get()?)?
             == 1)
     }
