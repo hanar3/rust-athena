@@ -2,7 +2,13 @@
 
 The baseline is registration, login, character creation and reload, map transfer, Prontera load, and single-player walking, all verified in Rodecomp. The first release target proposed here is a playable loop for `PACKETVER=20260219`. The full list of features and mechanics to emulate is still open.
 
-GitHub Issues in `hanar3/rust-athena` will track implementation work. Keep design decisions in the repository and link them from issues. Keep verification evidence with the issue or its implementing PR. Use rAthena to establish observable behavior and wire compatibility. Use Rust Athena’s own process and module design.
+Use rAthena to establish observable behavior and wire compatibility. Use Rust Athena’s own process and module design.
+
+## How work moves from issue to PR
+
+1. **File the issue first.** Put each deliverable in [GitHub Issues](https://github.com/hanar3/rust-athena/issues). Write it for a contributor who knows Rust, Ragnarok, and networking and is new to this repository. Include the starting point, the result to build, the files to read, the steps, any dependencies, and how to verify it.
+2. **Pick up an unblocked issue.** Use the issue as the implementation brief. Record discoveries and scope changes on the issue. If a discovery calls for separate work, file and link a follow-up.
+3. **Open a PR linked to the issue.** Use `Closes #N` when the PR implements the full issue. Explain the decisions that shape the implementation, list what was verified and how, and identify any live Rodecomp check still pending. Record durable protocol findings and design decisions in the repository so future contributors can find them after the PR merges.
 
 ## Proposed sequence
 

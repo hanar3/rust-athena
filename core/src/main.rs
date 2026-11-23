@@ -2,6 +2,7 @@ mod char_server;
 mod listener;
 mod login_server;
 mod map_server;
+mod map_sessions;
 mod protocol;
 mod terrain;
 
