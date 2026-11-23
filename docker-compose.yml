@@ -1,20 +1,15 @@
-# Use root/example as user/password credentials
-version: '3.1'
-
 services:
   db:
-    image: mysql
-    command: --default-authentication-plugin=mysql_native_password
-    restart: always
+    image: mariadb:11
     environment:
-        MYSQL_USER: ragnarok
-        MYSQL_PASSWORD: ragnarok
-        MYSQL_ALLOW_EMPTY_PASSWORD: true
-        MYSQL_DATABASE: ragnarok
+      MARIADB_USER: ragnarok
+      MARIADB_PASSWORD: ragnarok
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+      MARIADB_DATABASE: ragnarok
     ports:
-       - 3306:3306
-  adminer:
-    image: adminer
-    restart: always
-    ports:
-      - 8080:8080
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - database:/var/lib/mysql
+
+volumes:
+  database:

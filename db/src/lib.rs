@@ -1,37 +1,109 @@
 #[macro_use]
 extern crate diesel;
-extern crate dotenv;
 
-pub mod models;
-pub mod schema;
+mod models;
+mod schema;
+
+pub use models::{Account, Character, NewCharacter};
 
 use diesel::mysql::MysqlConnection;
 use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Error};
-use dotenv::dotenv;
-use lazy_static::lazy_static;
-use r2d2;
-use std::env;
+use diesel::r2d2::{ConnectionManager, Pool};
+use diesel::sql_types::{BigInt, Integer, TinyInt, Unsigned};
+use schema::{characters, users};
 
-type Pool = r2d2::Pool<ConnectionManager<MysqlConnection>>;
-pub type DbConnection = r2d2::PooledConnection<ConnectionManager<MysqlConnection>>;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-lazy_static! {
-  static ref POOL: Pool = {
-    dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let manager = ConnectionManager::<MysqlConnection>::new(database_url);
-    Pool::new(manager).expect("Failed to create db pool")
-  };
-}
+#[derive(Clone)]
+pub struct Database(Pool<ConnectionManager<MysqlConnection>>);
 
-pub fn connection() -> Result<DbConnection, diesel::ConnectionError> {
-  POOL
-    .get()
-    .map_err(|e| diesel::ConnectionError::BadConnection(e.to_string()))
-}
+impl Database {
+    pub fn connect(url: &str) -> Result<Self> {
+        Ok(Self(
+            Pool::builder()
+                .max_size(8)
+                .build(ConnectionManager::new(url))?,
+        ))
+    }
 
-pub fn init() {
-  lazy_static::initialize(&POOL);
-  let conn = connection().expect("Failed to get db connection");
+    pub fn register(&self, username: &str, hash: &str, email: &str) -> Result<()> {
+        diesel::insert_into(users::table)
+            .values((
+                users::username.eq(username),
+                users::password_hash.eq(hash),
+                users::email.eq(email),
+            ))
+            .execute(&self.0.get()?)?;
+        Ok(())
+    }
+
+    pub fn account(&self, username: &str) -> Result<Option<Account>> {
+        Ok(users::table
+            .filter(users::username.eq(username))
+            .select((users::id, users::password_hash, users::sex))
+            .first(&self.0.get()?)
+            .optional()?)
+    }
+
+    pub fn issue_handoff(&self, account: u32, ids: [u32; 2], sex: u8) -> Result<()> {
+        let connection = self.0.get()?;
+        diesel::sql_query("DELETE FROM login_handoffs WHERE expires_at <= UTC_TIMESTAMP(6)")
+            .execute(&connection)?;
+        diesel::sql_query(
+            "INSERT INTO login_handoffs (account_id, login_id1, login_id2, sex, expires_at)
+             VALUES (?, ?, ?, ?, UTC_TIMESTAMP(6) + INTERVAL 60 SECOND)
+             ON DUPLICATE KEY UPDATE login_id1 = ?, login_id2 = ?, sex = ?,
+                 expires_at = UTC_TIMESTAMP(6) + INTERVAL 60 SECOND",
+        )
+        .bind::<BigInt, _>(i64::from(account))
+        .bind::<Unsigned<Integer>, _>(ids[0])
+        .bind::<Unsigned<Integer>, _>(ids[1])
+        .bind::<Unsigned<TinyInt>, _>(sex)
+        .bind::<Unsigned<Integer>, _>(ids[0])
+        .bind::<Unsigned<Integer>, _>(ids[1])
+        .bind::<Unsigned<TinyInt>, _>(sex)
+        .execute(&connection)?;
+        Ok(())
+    }
+
+    pub fn redeem_handoff(&self, account: u32, ids: [u32; 2], sex: u8) -> Result<bool> {
+        Ok(diesel::sql_query(
+            "DELETE FROM login_handoffs WHERE account_id = ? AND login_id1 = ?
+             AND login_id2 = ? AND sex = ? AND expires_at > UTC_TIMESTAMP(6)",
+        )
+        .bind::<BigInt, _>(i64::from(account))
+        .bind::<Unsigned<Integer>, _>(ids[0])
+        .bind::<Unsigned<Integer>, _>(ids[1])
+        .bind::<Unsigned<TinyInt>, _>(sex)
+        .execute(&self.0.get()?)?
+            == 1)
+    }
+
+    pub fn characters(&self, account: u32) -> Result<Vec<Character>> {
+        Ok(characters::table
+            .filter(characters::account_id.eq(i64::from(account)))
+            .order(characters::slot.asc())
+            .load(&self.0.get()?)?)
+    }
+
+    pub fn create_character(&self, character: NewCharacter<'_>) -> Result<Option<Character>> {
+        let connection = self.0.get()?;
+        let result = connection.transaction::<_, diesel::result::Error, _>(|| {
+            diesel::insert_into(characters::table)
+                .values(&character)
+                .execute(&connection)?;
+            characters::table
+                .filter(characters::account_id.eq(character.account_id))
+                .filter(characters::slot.eq(character.slot))
+                .first(&connection)
+        });
+        match result {
+            Ok(created) => Ok(Some(created)),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
 }

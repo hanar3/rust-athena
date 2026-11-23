@@ -1,24 +1,60 @@
-# rust-athena
-Ragnarok Online login and char servers reimplemented in rust
+# Rust Athena
 
-[WIP] For learning purpouses only -- Creates a local server that implements most of the packets used by login and character selection for Ragnarok Online.
-The server also creates a default character.
+A Rust server for the [Rodecomp client](https://github.com/rodecomp/rodecomp), using the client protocol for `PACKETVER=20260219`. Login and character selection run as separate processes. Accounts and characters persist in MariaDB through the MySQL driver. Character selection reports that the map is unavailable until map admission is implemented.
 
-## Tooling
-[Wireshark](https://www.wireshark.org/) - Monitor network protocol
+## Local setup
 
-[WARP](https://github.com/Neo-Mind/WARP) - Disable packet encryption on client-side
+Install Rust, Docker Compose, and the MySQL client development library used by Diesel. On macOS with Homebrew's keg-only MySQL client, add it to the linker search path before building.
 
-Inspired by [rAthena](https://github.com/rathena/rathena)
+```sh
+export LIBRARY_PATH="$(brew --prefix mysql-client)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+```
 
-## Local 2026-02-19 demo
+Start the local database and configure both server processes to use it. Export this URL in each terminal that runs a server, or put it in a local `.env` file.
 
-Run `cargo run --locked -- --demo-20260219` and point a compatible client at
-`127.0.0.1:6900`. Sign in with the local test credentials `tester2` / `tester2`,
-then select the **Rust Athena** character server. Slot zero contains **Ferris**.
-The demo listens only on loopback and uses in-memory data. Building still
-requires the existing MySQL client library dependency.
+```sh
+docker compose up -d db
+export DATABASE_URL='mysql://ragnarok:ragnarok@127.0.0.1:3306/ragnarok'
+```
 
-Packet reference: rAthena revision `226bd83d39584bc91b6bf133f40bce95aa1f178c`,
-built with `PACKETVER=20260219`. The checked-in fixture records the one-character
-`0x0b72` response for the seeded account.
+On a fresh database, apply both migrations in this order after MariaDB finishes initializing. If the original `users` migration is already applied, start with the second migration. It requires unique usernames under the database collation. Review existing duplicates before running it. Old password values must already be bcrypt hashes to work with the new login server.
+
+```sh
+docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
+  < db/migrations/2022-04-09-114552_create_users/up.sql
+docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
+  < db/migrations/2026-11-23-000000_game_servers/up.sql
+cargo build --locked
+```
+
+Register a local account using the CLI. In Bash or Zsh, the following reads the password without echo and passes it on standard input.
+
+```sh
+read -rs athena_password
+printf '%s\n' "$athena_password" | target/debug/rust-athena register myuser me@example.invalid
+unset athena_password
+```
+
+Start each process in its own terminal.
+
+```sh
+target/debug/rust-athena char
+target/debug/rust-athena login
+```
+
+Point Rodecomp at `127.0.0.1:6900`, sign in, select **Rust Athena**, and create a character in an empty slot. Sign out and back in to check that it reloads. The current creation rules accept Novice and Summoner, and names of 4–23 ASCII letters, digits, or underscores.
+
+## Configuration
+
+| Variable | Default | Used by |
+| --- | --- | --- |
+| `DATABASE_URL` | Required | Registration, login, character |
+| `ATHENA_PACKETVER` | `20260219` | Server startup |
+| `ATHENA_LOGIN_BIND` | `127.0.0.1:6900` | Login |
+| `ATHENA_CHAR_BIND` | `127.0.0.1:6121` | Character |
+| `ATHENA_CHAR_ADVERTISE` | `127.0.0.1:6121` | Login reply sent to the client |
+| `ATHENA_CHAR_NAME` | `Rust Athena` | Login reply sent to the client |
+
+Keep development instances on loopback or a trusted private network. The supported client login packet carries credentials without transport encryption.
+
+Run `cargo test --locked --workspace` for the protocol regressions. See the [architecture notes](docs/architecture.md) for ownership, validation, and the map-server implementation sequence.
