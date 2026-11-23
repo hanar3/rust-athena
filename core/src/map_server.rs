@@ -1,10 +1,10 @@
-use std::io::Write;
 use std::net::{SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
+use std::{env, fs, io::Write};
 
 use rust_athena_db::Database;
 
-use crate::{listener, protocol::v20260219 as wire, Result};
+use crate::{listener, protocol::v20260219 as wire, terrain::Terrain, Result};
 
 pub const START_MAP: &str = "prontera.gat";
 const SPAWN_X: u16 = 156;
@@ -13,13 +13,34 @@ const SPAWN_DIRECTION: u8 = 4;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub fn serve(db: Database, bind: SocketAddrV4) -> Result<()> {
+    let terrain = env::var_os("ATHENA_MAP_CACHE")
+        .map(|path| -> Result<Terrain> {
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("ATHENA_MAP_CACHE {:?}: {}", path, error))?;
+            let map = START_MAP.strip_suffix(".gat").unwrap_or(START_MAP);
+            Ok(Terrain::from_cache(&bytes, map)?)
+        })
+        .transpose()?;
+    if let Some(terrain) = &terrain {
+        if !terrain.walkable((SPAWN_X, SPAWN_Y)) {
+            return Err("Configured terrain blocks the Prontera spawn".into());
+        }
+        println!("Loaded walkability for {}", START_MAP);
+    } else {
+        println!("Movement disabled. Set ATHENA_MAP_CACHE to enable it.");
+    }
     let started = Instant::now();
     listener::serve(bind, Duration::from_secs(10), move |stream| {
-        handle(&db, stream, started)
+        handle(&db, stream, started, terrain.as_ref())
     })
 }
 
-fn handle(db: &Database, mut stream: TcpStream, started: Instant) -> Result<()> {
+fn handle(
+    db: &Database,
+    mut stream: TcpStream,
+    started: Instant,
+    terrain: Option<&Terrain>,
+) -> Result<()> {
     let entry = wire::read_map_entry(&mut stream)?;
     if !db.redeem_map_transfer(
         entry.account,
@@ -45,6 +66,8 @@ fn handle(db: &Database, mut stream: TcpStream, started: Instant) -> Result<()> 
     ))?;
     let load_deadline = Instant::now() + LOAD_TIMEOUT;
     let mut loaded = false;
+    let mut position = (SPAWN_X, SPAWN_Y);
+    let mut walking = None;
     loop {
         let timeout = if loaded {
             LOAD_TIMEOUT
@@ -75,11 +98,39 @@ fn handle(db: &Database, mut stream: TcpStream, started: Instant) -> Result<()> 
             wire::MapRequest::ConfirmLoad if loaded => {
                 stream.write_all(&wire::MAP_LOAD_CONFIRMED)?
             }
-            wire::MapRequest::ConfirmLoad => {}
+            wire::MapRequest::ConfirmLoad
+            | wire::MapRequest::RemainingPlaytime
+            | wire::MapRequest::CashShopCatalog => {}
             wire::MapRequest::SyncTime => {
                 stream.write_all(&wire::map_time(server_tick(started)))?
             }
             wire::MapRequest::Ping => stream.write_all(&wire::MAP_PONG)?,
+            wire::MapRequest::Move(x, y) => {
+                let Some(terrain) = terrain.filter(|_| loaded) else {
+                    continue;
+                };
+                let now = Instant::now();
+                if let Some((destination, arrival)) = walking {
+                    if now < arrival {
+                        continue;
+                    }
+                    position = destination;
+                    walking = None;
+                }
+                let destination = (x, y);
+                if let Some(duration) = terrain.walk_duration(position, destination) {
+                    stream.write_all(&wire::player_move(
+                        server_tick(started),
+                        position,
+                        destination,
+                    ))?;
+                    walking = Some((destination, now + duration));
+                    println!(
+                        "Character {} walking from {:?} to {:?}",
+                        entry.character, position, destination
+                    );
+                }
+            }
         }
     }
 }

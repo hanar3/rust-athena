@@ -334,6 +334,9 @@ pub enum MapRequest {
     SyncTime,
     Ping,
     ConfirmLoad,
+    RemainingPlaytime,
+    CashShopCatalog,
+    Move(u16, u16),
 }
 
 pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
@@ -345,8 +348,34 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
         }
         0x0b1c => Ok(MapRequest::Ping),
         0x0447 => Ok(MapRequest::ConfirmLoad),
+        0x01c0 => Ok(MapRequest::RemainingPlaytime),
+        0x08c9 => Ok(MapRequest::CashShopCatalog),
+        0x035f => {
+            let mut position = [0; 3];
+            reader.read_exact(&mut position)?;
+            let [a, b, c] = position.map(u16::from);
+            Ok(MapRequest::Move(
+                (a << 2) | (b >> 6),
+                ((b & 63) << 4) | (c >> 4),
+            ))
+        }
         id => Err(unsupported("map", id)),
     }
+}
+
+pub fn player_move(tick: u32, (x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) -> [u8; 12] {
+    let mut reply = [0; 12];
+    reply[..2].copy_from_slice(&0x0087u16.to_le_bytes());
+    reply[2..6].copy_from_slice(&tick.to_le_bytes());
+    reply[6..].copy_from_slice(&[
+        (x >> 2) as u8,
+        (((x & 3) << 6) | (y >> 4)) as u8,
+        (((y & 15) << 4) | (dest_x >> 6)) as u8,
+        (((dest_x & 63) << 2) | (dest_y >> 8)) as u8,
+        dest_y as u8,
+        0x88,
+    ]);
+    reply
 }
 
 pub fn map_time(tick: u32) -> [u8; 6] {
@@ -362,6 +391,37 @@ pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_requests_keep_following_move_aligned() {
+        let mut requests: &[u8] = &[0xc0, 0x01, 0xc9, 0x08, 0x5f, 0x03, 0x27, 0x4b, 0xf0];
+        assert!(matches!(
+            read_map_request(&mut requests).unwrap(),
+            MapRequest::RemainingPlaytime
+        ));
+        assert!(matches!(
+            read_map_request(&mut requests).unwrap(),
+            MapRequest::CashShopCatalog
+        ));
+        assert!(matches!(
+            read_map_request(&mut requests).unwrap(),
+            MapRequest::Move(157, 191)
+        ));
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn move_request_and_reply_pack_both_tiles() {
+        let mut request: &[u8] = &[0x5f, 0x03, 0x27, 0x4b, 0xf0];
+        assert!(matches!(
+            read_map_request(&mut request).unwrap(),
+            MapRequest::Move(157, 191)
+        ));
+        assert_eq!(
+            player_move(0x12345678, (156, 191), (157, 191)),
+            [0x87, 0, 0x78, 0x56, 0x34, 0x12, 0x27, 0x0b, 0xf2, 0x74, 0xbf, 0x88]
+        );
+    }
 
     #[test]
     fn map_acceptance_encodes_spawn_and_frames_the_load_exchange() {

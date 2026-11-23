@@ -47,7 +47,17 @@ target/debug/rust-athena login
 
 Point Rodecomp at `127.0.0.1:6900`, sign in, select **Rust Athena**, and create a character in an empty slot. Sign out and back in to check that it reloads. The current creation rules accept Novice and Summoner, and names of 4–23 ASCII letters, digits, or underscores.
 
-To validate map loading, select a saved character. Rodecomp should load Prontera at `(156, 191)` and the map process should log `Character … loaded prontera.gat at (156, 191)`. This milestone covers the initial load and connection maintenance. Movement and world simulation are pending.
+To validate map loading, select a saved character. Rodecomp should load Prontera at `(156, 191)` and the map process should log `Character … loaded prontera.gat at (156, 191)`. The map process handles initial loading and keeps the connection alive.
+
+## Try movement in Prontera
+
+Build the current binary and start the map process with an rAthena renewal map cache that matches your client’s terrain. For a local rAthena checkout, use its `db/re/map_cache.dat`. Keep the cache outside this repository.
+
+```sh
+ATHENA_MAP_CACHE=/path/to/rathena/db/re/map_cache.dat target/debug/rust-athena map
+```
+
+When the server logs `Loaded walkability for prontera.gat`, connect and select a character. Click a nearby open tile, let the character arrive, and click again. Each accepted move logs its start and destination. Movement is limited to a route of up to 14 tiles. Walls, out-of-bounds destinations, and clicks while a walk is active are ignored. Reconnecting starts the character at the fixed spawn again.
 
 ## Configuration
 
@@ -58,6 +68,7 @@ To validate map loading, select a saved character. Rodecomp should load Prontera
 | `ATHENA_LOGIN_BIND` | `127.0.0.1:6900` | Login |
 | `ATHENA_CHAR_BIND` | `127.0.0.1:6121` | Character |
 | `ATHENA_CHAR_ADVERTISE` | `127.0.0.1:6121` | Login reply sent to the client |
+| `ATHENA_MAP_CACHE` | Optional. Movement is disabled when unset. | Map |
 | `ATHENA_MAP_BIND` | `127.0.0.1:5121` | Map |
 | `ATHENA_MAP_ADVERTISE` | `127.0.0.1:5121` | Character reply sent to the client |
 | `ATHENA_CHAR_NAME` | `Rust Athena` | Login reply sent to the client |

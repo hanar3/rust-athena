@@ -3,6 +3,7 @@ mod listener;
 mod login_server;
 mod map_server;
 mod protocol;
+mod terrain;
 
 use std::env;
 use std::io::{self, BufRead};
