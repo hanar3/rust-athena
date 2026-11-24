@@ -133,6 +133,41 @@ impl Database {
             .optional()?)
     }
 
+    pub fn character_position(
+        &self,
+        account: u32,
+        id: u32,
+        map: &str,
+    ) -> Result<Option<(u16, u16)>> {
+        let row = characters::table
+            .find(id)
+            .filter(characters::account_id.eq(i64::from(account)))
+            .filter(characters::map_name.eq(map))
+            .select((characters::last_x, characters::last_y))
+            .first::<(Option<u16>, Option<u16>)>(&self.0.get()?)?;
+        Ok(row.0.zip(row.1))
+    }
+
+    pub fn save_character_position(
+        &self,
+        account: u32,
+        id: u32,
+        map: &str,
+        (x, y): (u16, u16),
+    ) -> Result<()> {
+        let row = characters::table
+            .find(id)
+            .filter(characters::account_id.eq(i64::from(account)))
+            .filter(characters::map_name.eq(map));
+        diesel::update(row)
+            .set((
+                characters::last_x.eq(Some(x)),
+                characters::last_y.eq(Some(y)),
+            ))
+            .execute(&self.0.get()?)?;
+        Ok(())
+    }
+
     pub fn characters(&self, account: u32) -> Result<Vec<Character>> {
         Ok(characters::table
             .filter(characters::account_id.eq(i64::from(account)))

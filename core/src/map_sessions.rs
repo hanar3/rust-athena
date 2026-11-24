@@ -19,7 +19,9 @@ pub struct MapSessions {
 
 enum Command {
     Admit(Player, SyncSender<bool>),
+    Spawn(u32, Option<Tile>, SyncSender<Tile>),
     Loaded(u32, SyncSender<bool>),
+    Finish(u32, SyncSender<Option<Tile>>),
     Walk(u32, Tile, SyncSender<Option<Tile>>),
     Reply(u32, Vec<u8>),
     Disconnect(u32),
@@ -192,6 +194,16 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
             Command::Admit(player, reply) => {
                 let _ = reply.send(state.admit(player));
             }
+            Command::Spawn(account, saved, reply) => {
+                let player = state.players.get_mut(&account).unwrap();
+                if let Some(tile) = saved.filter(|&tile| valid_spawn(terrain.as_ref(), tile)) {
+                    player.tile = tile;
+                }
+                let _ = reply.send(player.tile);
+            }
+            Command::Finish(account, reply) => {
+                let _ = reply.send(state.finish(account, now, tick(now)));
+            }
             Command::Loaded(account, reply) => {
                 let _ = reply.send(state.loaded(account, now, tick(now)));
             }
@@ -214,6 +226,10 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
     }
 }
 
+fn valid_spawn(terrain: Option<&Terrain>, (x, y): Tile) -> bool {
+    x < 1024 && y < 1024 && terrain.is_none_or(|terrain| terrain.walkable((x, y)))
+}
+
 fn map_stopped() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "map loop stopped")
 }
@@ -227,6 +243,17 @@ pub struct Session<'a> {
 impl Session<'_> {
     pub fn send(&self, packet: impl Into<Vec<u8>>) -> io::Result<()> {
         self.map.send(Command::Reply(self.account, packet.into()))
+    }
+
+    pub fn restore_position(&self, saved: Option<Tile>) -> io::Result<Tile> {
+        self.map
+            .request(|reply| Command::Spawn(self.account, saved, reply))
+    }
+
+    /// Remove visibility now, but keep the account reserved until the caller saves.
+    pub fn finish(&self) -> io::Result<Option<Tile>> {
+        self.map
+            .request(|reply| Command::Finish(self.account, reply))
     }
 
     pub fn loaded(&self) -> io::Result<bool> {
@@ -253,6 +280,18 @@ impl MapState {
         };
         entry.insert(player);
         true
+    }
+
+    fn finish(&mut self, account: u32, now: Instant, tick: u32) -> Option<Tile> {
+        let player = self.players.get_mut(&account)?;
+        if !std::mem::replace(&mut player.loaded, false) {
+            return None;
+        }
+        player.advance(now);
+        player.steps.clear();
+        let tile = player.tile;
+        self.refresh_visibility(tick);
+        Some(tile)
     }
 
     fn loaded(&mut self, account: u32, now: Instant, tick: u32) -> bool {
@@ -347,6 +386,32 @@ mod tests {
     }
 
     #[test]
+    fn finishing_saves_only_reached_tiles_and_retires_visibility() {
+        let now = Instant::now();
+        let mut map = MapState::default();
+        let left = open(&mut map, 7, (156, 191));
+        let right = open(&mut map, 8, (156, 191));
+        assert_eq!(map.finish(8, now, 0), None);
+        assert!(map.loaded(7, now, 0));
+        assert!(map.loaded(8, now, 0));
+        assert_eq!(left.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        assert_eq!(right.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        packet(&left, 0x09ff, 8, 5);
+        packet(&right, 0x09ff, 7, 5);
+        let player = map.players.get_mut(&8).unwrap();
+        player.steps.extend([
+            (now + Duration::from_millis(150), (157, 191)),
+            (now + Duration::from_millis(300), (158, 191)),
+        ]);
+        assert_eq!(
+            map.finish(8, now + Duration::from_millis(200), 200),
+            Some((157, 191))
+        );
+        packet(&left, 0x0080, 8, 2);
+        assert!(map.players.contains_key(&8));
+    }
+
+    #[test]
     fn loaded_players_enter_leave_and_reenter_mutual_visibility() {
         let now = Instant::now();
         let mut map = MapState::default();
@@ -424,9 +489,17 @@ mod tests {
         assert!(admit(109).0.is_none());
         assert!(first.loaded().unwrap());
         assert_eq!(first_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        assert_eq!(first.finish().unwrap(), Some((1, 2)));
+        assert!(
+            admit(109).0.is_none(),
+            "the finishing lease keeps its reservation during the save"
+        );
         drop(first);
         let (next, next_rx) = admit(109);
-        assert!(next.unwrap().loaded().unwrap());
+        let next = next.unwrap();
+        assert_eq!(next.restore_position(Some((1024, 3))).unwrap(), (1, 2));
+        assert_eq!(next.restore_position(Some((4, 3))).unwrap(), (4, 3));
+        assert!(next.loaded().unwrap());
         assert_eq!(next_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
     }
 }
