@@ -115,7 +115,10 @@ fn handle(
     if let Some(tile) = session.finish()? {
         db.save_character_position(entry.account, entry.character, START_MAP, tile)?;
     }
-    connection
+    // The read loop returns normally only for an accepted quit. Enqueue its
+    // reply before dropping the lease so the socket writer flushes it in order.
+    connection?;
+    session.send(wire::map_quit_ack(true)).map_err(Into::into)
 }
 
 fn run_session(
@@ -159,6 +162,8 @@ fn run_session(
             | wire::MapRequest::CashShopCatalog => {}
             wire::MapRequest::SyncTime => session.send(wire::map_time(server_tick(started)))?,
             wire::MapRequest::Ping => session.send(wire::MAP_PONG)?,
+            wire::MapRequest::Quit if loaded => return Ok(()),
+            wire::MapRequest::Quit => session.send(wire::map_quit_ack(false))?,
             wire::MapRequest::Move(x, y) => {
                 let destination = (x, y);
                 if let Some(position) = session.begin_walk(destination)? {
