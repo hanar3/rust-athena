@@ -125,6 +125,14 @@ impl Database {
             == 1)
     }
 
+    pub fn character(&self, account: u32, id: u32) -> Result<Option<Character>> {
+        Ok(characters::table
+            .filter(characters::account_id.eq(i64::from(account)))
+            .find(id)
+            .first(&self.0.get()?)
+            .optional()?)
+    }
+
     pub fn characters(&self, account: u32) -> Result<Vec<Character>> {
         Ok(characters::table
             .filter(characters::account_id.eq(i64::from(account)))

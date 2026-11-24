@@ -1,11 +1,11 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::{self, Read};
-use std::time::Duration;
 
 use flate2::bufread::ZlibDecoder;
 
 pub type Tile = (u16, u16);
+pub const WALK_MILLIS: u64 = 150;
 const MAX_STEPS: u8 = 14;
 
 pub struct Terrain {
@@ -73,7 +73,7 @@ impl Terrain {
             )
     }
 
-    pub fn walk_duration(&self, from: Tile, to: Tile) -> Option<Duration> {
+    pub fn route(&self, from: Tile, to: Tile) -> Option<Vec<Tile>> {
         if from == to
             || !self.walkable(from)
             || !self.walkable(to)
@@ -81,9 +81,9 @@ impl Terrain {
         {
             return None;
         }
-        let mut visited = HashSet::from([from]);
-        let mut pending = VecDeque::from([(from, 0, 0)]);
-        while let Some(((x, y), steps, millis)) = pending.pop_front() {
+        let mut visited = HashMap::from([(from, from)]);
+        let mut pending = VecDeque::from([(from, 0)]);
+        while let Some(((x, y), steps)) = pending.pop_front() {
             if steps == MAX_STEPS {
                 continue;
             }
@@ -106,15 +106,22 @@ impl Terrain {
                 let next = (next_x, next_y);
                 if !self.walkable(next)
                     || (diagonal && (!self.walkable((next_x, y)) || !self.walkable((x, next_y))))
-                    || !visited.insert(next)
+                    || visited.contains_key(&next)
                 {
                     continue;
                 }
-                let arrival = millis + if diagonal { 210 } else { 150 };
+                visited.insert(next, (x, y));
                 if next == to {
-                    return Some(Duration::from_millis(arrival));
+                    let mut path = vec![to];
+                    let mut previous = (x, y);
+                    while previous != from {
+                        path.push(previous);
+                        previous = visited[&previous];
+                    }
+                    path.reverse();
+                    return Some(path);
                 }
-                pending.push_back((next, steps + 1, arrival));
+                pending.push_back((next, steps + 1));
             }
         }
         None
@@ -148,13 +155,10 @@ mod tests {
         cache.extend(compressed);
 
         let map = Terrain::from_cache(&cache, "prontera").unwrap();
-        assert_eq!(
-            map.walk_duration((1, 1), (2, 1)),
-            Some(Duration::from_millis(150))
-        );
-        assert_eq!(map.walk_duration((1, 1), (0, 1)), None);
-        assert_eq!(map.walk_duration((1, 1), (0, 0)), None);
-        assert_eq!(map.walk_duration((1, 1), (3, 0)), None);
+        assert_eq!(map.route((1, 1), (2, 1)), Some(vec![(2, 1)]));
+        assert_eq!(map.route((1, 1), (0, 1)), None);
+        assert_eq!(map.route((1, 1), (0, 0)), None);
+        assert_eq!(map.route((1, 1), (3, 0)), None);
         assert!(Terrain::from_cache(&cache[..cache.len() - 1], "prontera").is_err());
     }
 }

@@ -35,9 +35,22 @@ The transfer expires after 60 seconds and is stored separately from the consumed
 
 As Rodecomp enters the world, it can send two-byte requests for remaining playtime (`0x01c0`) and the cash-shop catalog (`0x08c9`). The map process consumes both without replying. rAthena also sends no catalog packets when all shop tabs are empty. [Packet table](https://github.com/rathena/rathena/blob/master/src/map/clif_packetdb.hpp) · [Catalog handling](https://github.com/rathena/rathena/blob/master/src/map/clif.cpp#L16123)
 
-The client sends a packed destination in `0x035f`. Once the map is loaded, the process checks that destination against Prontera’s walkability data and searches up to 14 steps, including diagonals where both adjacent cardinal tiles are open. The map process sends `0x0087` with the source, destination and server tick for an accepted walk. The map process owns each character’s position and pending arrival. A connection holds an exclusive session from transfer redemption until disconnect. A duplicate map connection is refused while the original session is alive. The character becomes active after the client’s map-loaded packet. Position queries settle completed walks using the server clock. Clicks during a walk are ignored. Position resets on reconnect.
+The client sends a packed destination in `0x035f`. Once the map is loaded, the process checks that destination against Prontera’s walkability data and searches up to 14 steps, including diagonals where both adjacent cardinal tiles are open. The map process sends `0x0087` with the source, destination and server tick for an accepted walk. The map process owns each character’s position and pending arrival. A connection holds an exclusive session from transfer redemption until disconnect. A duplicate map connection for the same account is refused while the original session is alive. On this map, the account ID is the actor ID on the wire and the character ID identifies the saved character. The character becomes active after the client’s map-loaded packet. Position queries settle completed walks using the server clock. Clicks during a walk are ignored. Position resets on reconnect.
 
-The map role can load Prontera’s terrain from a local rAthena map cache. The protocol module owns the packet layout, while the terrain module owns cache decoding and route validation. This slice covers a single player’s movement confirmation. Persistence, world actors, and broadcast remain future work. [rAthena walk acknowledgement](https://github.com/rathena/rathena/blob/master/src/map/clif.cpp#L1933) · [rAthena terrain cell types](https://github.com/rathena/rathena/blob/master/src/map/map.cpp#L3076)
+The map role can load Prontera’s terrain from a local rAthena map cache. The protocol module owns the packet layout, while the terrain module owns cache decoding and route validation. This slice covers a player’s movement confirmation. Position persistence remains future work. [rAthena walk acknowledgement](https://github.com/rathena/rathena/blob/master/src/map/clif.cpp#L1933) · [rAthena terrain cell types](https://github.com/rathena/rathena/blob/master/src/map/map.cpp#L3076)
+
+## Nearby players
+
+The map tracks loaded players and updates their position as they reach successive tiles. Two players on this map see each other within 14 tiles along both axes. Load completion, movement across that range, and disconnect update the set of visible peers. Each connection has a bounded write queue. Map state enqueues packets in order and the connection’s writer handles socket I/O.
+
+| Wire response | Recipient and contents |
+| --- | --- |
+| `0x09ff` | A player who gains sight of a stationary peer. Carries the peer’s account and character IDs, position, name, sex, job, hair and palette. |
+| `0x09fd` | A player who gains sight of a walking peer, or who can already see the peer when they start walking. Carries appearance and route fields. |
+| `0x0087` | The walking player. Confirms their own route. |
+| `0x0080` | A player who loses sight of a peer at the range edge or on disconnect. |
+
+The entry layouts follow rAthena’s idle and walking actor structs and Rodecomp’s `ReceiveActorStateEntryNamedBody` and `ReceiveActorMoveEntryBody` decoders. NPCs and map transfers are separate work. [rAthena actor structs](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/packets_struct.hpp) · [Rodecomp actor decoders](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp)
 
 ## Verification
 

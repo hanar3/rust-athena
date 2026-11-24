@@ -367,14 +367,78 @@ pub fn player_move(tick: u32, (x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) 
     let mut reply = [0; 12];
     reply[..2].copy_from_slice(&0x0087u16.to_le_bytes());
     reply[2..6].copy_from_slice(&tick.to_le_bytes());
-    reply[6..].copy_from_slice(&[
+    reply[6..].copy_from_slice(&packed_walk((x, y), (dest_x, dest_y)));
+    reply
+}
+
+fn packed_walk((x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) -> [u8; 6] {
+    [
         (x >> 2) as u8,
         (((x & 3) << 6) | (y >> 4)) as u8,
         (((y & 15) << 4) | (dest_x >> 6)) as u8,
         (((dest_x & 63) << 2) | (dest_y >> 8)) as u8,
         dest_y as u8,
         0x88,
-    ]);
+    ]
+}
+
+pub struct PlayerAppearance {
+    pub account: u32,
+    pub character: u32,
+    pub name: String,
+    pub job: i16,
+    pub hair: i16,
+    pub hair_color: i16,
+    pub sex: u8,
+}
+
+pub fn visible_player(
+    actor: &PlayerAppearance,
+    (x, y): (u16, u16),
+    direction: u8,
+    walk: Option<(u32, (u16, u16))>,
+) -> Vec<u8> {
+    let (opcode, name_offset, palette_offset, sex_offset) = if walk.is_some() {
+        (0x09fd, 0x5a, 0x2d, 0x42)
+    } else {
+        (0x09ff, 0x54, 0x29, 0x3e)
+    };
+    let mut reply = vec![0; name_offset + 24];
+    let header = variable_header(opcode, reply.len());
+    reply[..4].copy_from_slice(&header);
+    reply[5..9].copy_from_slice(&actor.account.to_le_bytes());
+    reply[9..13].copy_from_slice(&actor.character.to_le_bytes());
+    reply[13..15].copy_from_slice(&(crate::terrain::WALK_MILLIS as u16).to_le_bytes());
+    reply[0x17..0x19].copy_from_slice(&actor.job.to_le_bytes());
+    reply[0x19..0x1b].copy_from_slice(&actor.hair.to_le_bytes());
+    reply[palette_offset..palette_offset + 2].copy_from_slice(&actor.hair_color.to_le_bytes());
+    reply[palette_offset + 4..palette_offset + 6]
+        .copy_from_slice(&u16::from(direction).to_le_bytes());
+    reply[sex_offset] = actor.sex;
+    let level_offset = if let Some((tick, destination)) = walk {
+        reply[0x25..0x29].copy_from_slice(&tick.to_le_bytes());
+        reply[0x43..0x49].copy_from_slice(&packed_walk((x, y), destination));
+        reply[0x49..0x4b].fill(5);
+        0x4b
+    } else {
+        reply[0x3f..0x42].copy_from_slice(&[
+            (x >> 2) as u8,
+            (((x & 3) << 6) | (y >> 4)) as u8,
+            ((y & 15) << 4) as u8 | direction,
+        ]);
+        reply[0x42..0x44].fill(5);
+        0x45
+    };
+    reply[level_offset] = 1;
+    reply[level_offset + 4..level_offset + 12].fill(0xff);
+    let name_len = actor.name.len().min(23);
+    reply[name_offset..name_offset + name_len].copy_from_slice(&actor.name.as_bytes()[..name_len]);
+    reply
+}
+
+pub fn player_vanished(account: u32) -> Vec<u8> {
+    let mut reply = vec![0x80, 0, 0, 0, 0, 0, 0];
+    reply[2..6].copy_from_slice(&account.to_le_bytes());
     reply
 }
 
