@@ -23,6 +23,7 @@ enum Command {
     Loaded(u32, SyncSender<bool>),
     Finish(u32, SyncSender<Option<Tile>>),
     Walk(u32, Tile, SyncSender<Option<Tile>>),
+    Face(u32, u16, u8),
     Reply(u32, Vec<u8>),
     Disconnect(u32),
 }
@@ -40,6 +41,7 @@ struct Player {
     loaded: bool,
     tile: Tile,
     direction: u8,
+    head_direction: u16,
     steps: VecDeque<(Instant, Tile)>,
 }
 
@@ -72,7 +74,13 @@ impl Player {
             .steps
             .back()
             .map(|&(_, destination)| (tick, destination));
-        wire::visible_player(&self.appearance, self.tile, self.direction, walk)
+        wire::visible_player(
+            &self.appearance,
+            self.tile,
+            self.direction,
+            self.head_direction,
+            walk,
+        )
     }
 
     fn send(&mut self, packet: Vec<u8>) {
@@ -157,6 +165,7 @@ impl MapSessions {
             loaded: false,
             tile: spawn,
             direction,
+            head_direction: 0,
             steps: VecDeque::new(),
         };
         let admitted = self.request(|reply| Command::Admit(player, reply))?;
@@ -213,6 +222,10 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
                 });
                 let _ = reply.send(source);
             }
+            Command::Face(account, head, body) => {
+                state.advance(now, tick(now));
+                state.face(account, head, body);
+            }
             Command::Reply(account, packet) => {
                 if let Some(player) = state.players.get_mut(&account) {
                     player.send(packet);
@@ -259,6 +272,10 @@ impl Session<'_> {
     pub fn loaded(&self) -> io::Result<bool> {
         self.map
             .request(|reply| Command::Loaded(self.account, reply))
+    }
+
+    pub fn face(&self, head: u16, body: u8) -> io::Result<()> {
+        self.map.send(Command::Face(self.account, head, body))
     }
 
     pub fn begin_walk(&self, target: Tile) -> io::Result<Option<Tile>> {
@@ -337,6 +354,23 @@ impl MapState {
         player.send(wire::player_move(tick, source, target).to_vec());
 
         let packet = player.entry_packet(tick);
+        self.send_to_observers(account, packet);
+        Some(source)
+    }
+
+    fn face(&mut self, account: u32, head: u16, body: u8) {
+        let Some(player) = self.players.get_mut(&account) else {
+            return;
+        };
+        if !player.loaded || head > 2 || body > 7 {
+            return;
+        }
+        player.head_direction = head;
+        player.direction = body;
+        self.send_to_observers(account, wire::player_facing(account, head, body).to_vec());
+    }
+
+    fn send_to_observers(&mut self, account: u32, packet: Vec<u8>) {
         let MapState { visible, players } = self;
         for &(left, right) in visible.iter() {
             let viewer = if left == account {
@@ -348,7 +382,6 @@ impl MapState {
             };
             players.get_mut(&viewer).unwrap().send(packet.clone());
         }
-        Some(source)
     }
 }
 
@@ -373,6 +406,7 @@ mod tests {
             loaded: false,
             tile,
             direction: 4,
+            head_direction: 0,
             steps: VecDeque::new(),
         }));
         receiver
@@ -383,6 +417,40 @@ mod tests {
         assert_eq!(&packet[..2], &opcode.to_le_bytes());
         assert_eq!(&packet[offset..offset + 4], &account.to_le_bytes());
         packet
+    }
+
+    #[test]
+    fn facing_is_sent_only_to_loaded_visible_peers_and_retained_for_new_ones() {
+        let now = Instant::now();
+        let mut map = MapState::default();
+        let actor = open(&mut map, 7, (156, 191));
+        let peer = open(&mut map, 8, (157, 191));
+        let far = open(&mut map, 9, (180, 191));
+        assert!(map.loaded(8, now, 0));
+        assert!(map.loaded(9, now, 0));
+        assert_eq!(peer.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        assert_eq!(far.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        map.face(7, 2, 7);
+        assert!(peer.try_recv().is_err());
+        assert!(map.loaded(7, now, 0));
+        assert_eq!(actor.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        packet(&actor, 0x09ff, 8, 5);
+        packet(&peer, 0x09ff, 7, 5);
+        map.face(7, 3, 0);
+        map.face(7, 0, 8);
+        assert!(peer.try_recv().is_err());
+        map.face(7, 2, 7);
+        assert_eq!(packet(&peer, 0x009c, 7, 2)[6..], [2, 0, 7]);
+        assert!(actor.try_recv().is_err());
+        assert!(far.try_recv().is_err());
+        map.players.get_mut(&9).unwrap().tile = (158, 191);
+        map.refresh_visibility(1);
+        let entry = (0..2)
+            .map(|_| far.try_recv().unwrap())
+            .find(|packet| packet[5..9] == 7u32.to_le_bytes())
+            .unwrap();
+        assert_eq!(&entry[0x2d..0x2f], &[2, 0]);
+        assert_eq!(entry[0x41] & 15, 7);
     }
 
     #[test]

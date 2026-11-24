@@ -36,6 +36,12 @@ Directions are relative to the server. Multiple opcodes on one line belong to th
 | Map startup requests | `01c0` (2), `08c9` (2) | — | Consumed. The pinned rAthena table specifies two bytes for both. Rust Athena currently has an empty catalog. |
 | Map movement and actor visibility | `035f` (5) | `0087` (12), `09ff` and `09fd` (variable), `0080` (7) | Client-confirmed self movement. Two-client TCP tested appearance and visibility. Map state is in memory. Position writes on disconnect. |
 
+## Map facing
+
+Rodecomp sends `0361` (5) to update head and body direction. The map owner validates both values and sends `009c` (9) to visible observers. Actor entry packets include the current direction for newcomers. Facing is transient state. Codec, visibility, and two-client TCP checks passed. Live Rodecomp verification is pending.
+
+[Issue #11](https://github.com/hanar3/rust-athena/issues/11) · [rAthena direction handler](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11581) · [Rodecomp direction decoder](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L23842)
+
 ## Map quit
 
 | Exchange | Client request | Server reply | Behavior and evidence |

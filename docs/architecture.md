@@ -53,6 +53,7 @@ The map tracks loaded players and updates their position as they reach successiv
 | --- | --- |
 | `0x09ff` | A player who gains sight of a stationary peer. Carries the peer’s account and character IDs, position, name, sex, job, hair and palette. |
 | `0x09fd` | A player who gains sight of a walking peer, or who can already see the peer when they start walking. Carries appearance and route fields. |
+| `0x009c` | Nearby observers. Reports a head or body turn. |
 | `0x0087` | The walking player. Confirms their own route. |
 | `0x0080` | A player who loses sight of a peer at the range edge or on disconnect. |
 
