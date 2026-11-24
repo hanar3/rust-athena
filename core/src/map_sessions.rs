@@ -1,12 +1,15 @@
-//! The map loop owns live state. Connections send commands through a bounded queue.
-use std::collections::{hash_map::Entry, HashMap};
+//! A map process owns its live sessions. A connection holds a lease on one session.
+use std::cmp::Ordering::{Equal, Greater, Less};
+use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::terrain::{Terrain, Tile};
+use crate::protocol::v20260219 as wire;
+use crate::terrain::{Terrain, Tile, WALK_MILLIS};
 
+const SIGHT: u16 = 14;
 const COMMAND_CAPACITY: usize = 128;
 const TICK_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -15,61 +18,147 @@ pub struct MapSessions {
 }
 
 enum Command {
-    Admit(u32, Tile, SyncSender<bool>),
+    Admit(Player, SyncSender<bool>),
     Loaded(u32, SyncSender<bool>),
     Walk(u32, Tile, SyncSender<Option<Tile>>),
+    Reply(u32, Vec<u8>),
     Disconnect(u32),
-    #[cfg(test)]
-    Position(u32, SyncSender<Option<Tile>>),
+}
+
+#[derive(Default)]
+struct MapState {
+    players: HashMap<u32, Player>,
+    // Each sorted pair represents mutual visibility.
+    visible: HashSet<(u32, u32)>,
 }
 
 struct Player {
+    appearance: wire::PlayerAppearance,
+    output: Option<SyncSender<Vec<u8>>>,
     loaded: bool,
     tile: Tile,
-    walk: Option<(Tile, Instant)>,
+    direction: u8,
+    steps: VecDeque<(Instant, Tile)>,
 }
 
 impl Player {
-    fn advance(&mut self, now: Instant) {
-        if let Some((target, arrival)) = self.walk {
-            if now >= arrival {
-                self.tile = target;
-                self.walk = None;
+    fn advance(&mut self, now: Instant) -> bool {
+        let before = self.tile;
+        while let Some(&(arrival, tile)) = self.steps.front() {
+            if now < arrival {
+                break;
+            }
+            self.steps.pop_front();
+            self.direction = match (tile.0.cmp(&self.tile.0), tile.1.cmp(&self.tile.1)) {
+                (Equal, Greater) => 0,
+                (Less, Greater) => 1,
+                (Less, Equal) => 2,
+                (Less, Less) => 3,
+                (Equal, Less) => 4,
+                (Greater, Less) => 5,
+                (Greater, Equal) => 6,
+                (Greater, Greater) => 7,
+                (Equal, Equal) => self.direction,
+            };
+            self.tile = tile;
+        }
+        before != self.tile
+    }
+
+    fn entry_packet(&self, tick: u32) -> Vec<u8> {
+        let walk = self
+            .steps
+            .back()
+            .map(|&(_, destination)| (tick, destination));
+        wire::visible_player(&self.appearance, self.tile, self.direction, walk)
+    }
+
+    fn send(&mut self, packet: Vec<u8>) {
+        if let Some(output) = &self.output {
+            if output.try_send(packet).is_err() {
+                // Closing the queue makes the writer shut down a slow or lost peer.
+                self.output = None;
             }
         }
     }
+}
 
-    fn begin_walk(
-        &mut self,
-        terrain: Option<&Terrain>,
-        now: Instant,
-        target: Tile,
-    ) -> Option<Tile> {
-        self.advance(now);
-        if !self.loaded || self.walk.is_some() {
-            return None;
+impl MapState {
+    fn advance(&mut self, now: Instant, tick: u32) {
+        let mut changed = false;
+        for player in self.players.values_mut() {
+            changed |= player.advance(now);
         }
-        let duration = terrain?.walk_duration(self.tile, target)?;
-        self.walk = Some((target, now + duration));
-        Some(self.tile)
+        if changed {
+            self.refresh_visibility(tick);
+        }
+    }
+
+    fn refresh_visibility(&mut self, tick: u32) {
+        let active: Vec<_> = self
+            .players
+            .iter()
+            .filter(|(_, player)| player.loaded)
+            .collect();
+        let mut visible = HashSet::new();
+        for (index, (&left_id, left)) in active.iter().copied().enumerate() {
+            for (&right_id, right) in active[index + 1..].iter().copied() {
+                if left
+                    .tile
+                    .0
+                    .abs_diff(right.tile.0)
+                    .max(left.tile.1.abs_diff(right.tile.1))
+                    <= SIGHT
+                {
+                    visible.insert((left_id.min(right_id), left_id.max(right_id)));
+                }
+            }
+        }
+        let previous = std::mem::replace(&mut self.visible, visible);
+        for &(left, right) in self.visible.difference(&previous) {
+            let left_entry = self.players[&left].entry_packet(tick);
+            let right_entry = self.players[&right].entry_packet(tick);
+            self.players.get_mut(&left).unwrap().send(right_entry);
+            self.players.get_mut(&right).unwrap().send(left_entry);
+        }
+        for &(left, right) in previous.difference(&self.visible) {
+            if let Some(player) = self.players.get_mut(&left) {
+                player.send(wire::player_vanished(right));
+            }
+            if let Some(player) = self.players.get_mut(&right) {
+                player.send(wire::player_vanished(left));
+            }
+        }
     }
 }
 
 impl MapSessions {
-    pub fn start(terrain: Option<Terrain>) -> io::Result<Self> {
+    pub fn start(started: Instant, terrain: Option<Terrain>) -> io::Result<Self> {
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         thread::Builder::new()
             .name("map-loop".into())
-            .spawn(move || run(receiver, terrain))?;
+            .spawn(move || run(receiver, started, terrain))?;
         Ok(Self { commands })
     }
 
-    pub fn admit(&self, character: u32, spawn: Tile) -> io::Result<Option<Session<'_>>> {
-        let admitted = self.request(|reply| Command::Admit(character, spawn, reply))?;
-        Ok(admitted.then(|| Session {
-            map: self,
-            character,
-        }))
+    pub fn admit(
+        &self,
+        appearance: wire::PlayerAppearance,
+        spawn: Tile,
+        direction: u8,
+        output: SyncSender<Vec<u8>>,
+    ) -> io::Result<Option<Session<'_>>> {
+        let account = appearance.account;
+        let player = Player {
+            appearance,
+            output: Some(output),
+            loaded: false,
+            tile: spawn,
+            direction,
+            steps: VecDeque::new(),
+        };
+        let admitted = self.request(|reply| Command::Admit(player, reply))?;
+        Ok(admitted.then(|| Session { map: self, account }))
     }
 
     fn request<T>(&self, command: impl FnOnce(SyncSender<T>) -> Command) -> io::Result<T> {
@@ -83,15 +172,14 @@ impl MapSessions {
     }
 }
 
-fn run(commands: Receiver<Command>, terrain: Option<Terrain>) {
-    let mut players = HashMap::<u32, Player>::new();
+fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) {
+    let tick = |now: Instant| now.duration_since(started).as_millis() as u32;
+    let mut state = MapState::default();
     let mut next_tick = Instant::now() + TICK_INTERVAL;
     loop {
         let now = Instant::now();
         if now >= next_tick {
-            for player in players.values_mut() {
-                player.advance(now);
-            }
+            state.advance(now, tick(now));
             next_tick = now + TICK_INTERVAL;
         }
         let command = match commands.recv_timeout(next_tick.saturating_duration_since(now)) {
@@ -99,41 +187,28 @@ fn run(commands: Receiver<Command>, terrain: Option<Terrain>) {
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        let now = Instant::now();
         match command {
-            Command::Admit(character, spawn, reply) => {
-                if let Entry::Vacant(entry) = players.entry(character) {
-                    entry.insert(Player {
-                        loaded: false,
-                        tile: spawn,
-                        walk: None,
-                    });
-                    let _ = reply.send(true);
-                } else {
-                    let _ = reply.send(false);
-                }
+            Command::Admit(player, reply) => {
+                let _ = reply.send(state.admit(player));
             }
-            Command::Loaded(character, reply) => {
-                let first = players
-                    .get_mut(&character)
-                    .is_some_and(|player| !std::mem::replace(&mut player.loaded, true));
-                let _ = reply.send(first);
+            Command::Loaded(account, reply) => {
+                let _ = reply.send(state.loaded(account, now, tick(now)));
             }
-            Command::Walk(character, target, reply) => {
-                let source = players
-                    .get_mut(&character)
-                    .and_then(|player| player.begin_walk(terrain.as_ref(), Instant::now(), target));
+            Command::Walk(account, destination, reply) => {
+                let source = terrain.as_ref().and_then(|terrain| {
+                    state.begin_walk(account, terrain, now, tick(now), destination)
+                });
                 let _ = reply.send(source);
             }
-            Command::Disconnect(character) => {
-                players.remove(&character);
+            Command::Reply(account, packet) => {
+                if let Some(player) = state.players.get_mut(&account) {
+                    player.send(packet);
+                }
             }
-            #[cfg(test)]
-            Command::Position(character, reply) => {
-                let tile = players
-                    .get(&character)
-                    .filter(|player| player.loaded)
-                    .map(|player| player.tile);
-                let _ = reply.send(tile);
+            Command::Disconnect(account) => {
+                state.players.remove(&account);
+                state.refresh_visibility(tick(now));
             }
         }
     }
@@ -143,71 +218,215 @@ fn map_stopped() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "map loop stopped")
 }
 
-/// A connection's exclusive lease. Its disconnect queues behind its earlier commands.
+/// A live connection's exclusive lease. Its account ID is also its wire actor ID.
 pub struct Session<'a> {
     map: &'a MapSessions,
-    character: u32,
+    account: u32,
 }
 
 impl Session<'_> {
+    pub fn send(&self, packet: impl Into<Vec<u8>>) -> io::Result<()> {
+        self.map.send(Command::Reply(self.account, packet.into()))
+    }
+
     pub fn loaded(&self) -> io::Result<bool> {
         self.map
-            .request(|reply| Command::Loaded(self.character, reply))
+            .request(|reply| Command::Loaded(self.account, reply))
     }
 
     pub fn begin_walk(&self, target: Tile) -> io::Result<Option<Tile>> {
         self.map
-            .request(|reply| Command::Walk(self.character, target, reply))
+            .request(|reply| Command::Walk(self.account, target, reply))
     }
 }
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
-        let _ = self.map.send(Command::Disconnect(self.character));
+        let _ = self.map.send(Command::Disconnect(self.account));
+    }
+}
+
+impl MapState {
+    fn admit(&mut self, player: Player) -> bool {
+        let Entry::Vacant(entry) = self.players.entry(player.appearance.account) else {
+            return false;
+        };
+        entry.insert(player);
+        true
+    }
+
+    fn loaded(&mut self, account: u32, now: Instant, tick: u32) -> bool {
+        self.advance(now, tick);
+        let Some(player) = self.players.get_mut(&account) else {
+            return false;
+        };
+        player.send(wire::MAP_LOAD_CONFIRMED.to_vec());
+        if std::mem::replace(&mut player.loaded, true) {
+            return false;
+        }
+        self.refresh_visibility(tick);
+        true
+    }
+
+    fn begin_walk(
+        &mut self,
+        account: u32,
+        terrain: &Terrain,
+        now: Instant,
+        tick: u32,
+        target: Tile,
+    ) -> Option<Tile> {
+        self.advance(now, tick);
+        let player = self.players.get_mut(&account)?;
+        if !player.loaded || !player.steps.is_empty() {
+            return None;
+        }
+        let source = player.tile;
+        let route = terrain.route(source, target)?;
+        let mut previous = source;
+        let mut arrival = now;
+        for tile in route {
+            let diagonal = tile.0 != previous.0 && tile.1 != previous.1;
+            arrival += Duration::from_millis(if diagonal {
+                WALK_MILLIS * 14 / 10
+            } else {
+                WALK_MILLIS
+            });
+            player.steps.push_back((arrival, tile));
+            previous = tile;
+        }
+        player.send(wire::player_move(tick, source, target).to_vec());
+
+        let packet = player.entry_packet(tick);
+        let MapState { visible, players } = self;
+        for &(left, right) in visible.iter() {
+            let viewer = if left == account {
+                right
+            } else if right == account {
+                left
+            } else {
+                continue;
+            };
+            players.get_mut(&viewer).unwrap().send(packet.clone());
+        }
+        Some(source)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::{self, Receiver};
 
-    #[test]
-    fn map_loop_rejects_duplicate_and_releases_on_disconnect() {
-        let map = MapSessions::start(None).unwrap();
-        let first = map.admit(7, (1, 2)).unwrap().unwrap();
-        assert!(map.admit(7, (3, 4)).unwrap().is_none());
-        assert_eq!(
-            map.request(|reply| Command::Position(7, reply)).unwrap(),
-            None
-        );
-        assert!(first.loaded().unwrap());
-        assert!(!first.loaded().unwrap());
-        assert_eq!(
-            map.request(|reply| Command::Position(7, reply)).unwrap(),
-            Some((1, 2))
-        );
-        drop(first);
-        let second = map.admit(7, (3, 4)).unwrap().unwrap();
-        assert!(second.loaded().unwrap());
-        assert_eq!(
-            map.request(|reply| Command::Position(7, reply)).unwrap(),
-            Some((3, 4))
-        );
+    fn open(map: &mut MapState, account: u32, tile: Tile) -> Receiver<Vec<u8>> {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        assert!(map.admit(Player {
+            appearance: wire::PlayerAppearance {
+                account,
+                character: account + 100,
+                name: format!("Player{}", account),
+                job: 4218,
+                hair: 3,
+                hair_color: 2,
+                sex: 1
+            },
+            output: Some(sender),
+            loaded: false,
+            tile,
+            direction: 4,
+            steps: VecDeque::new(),
+        }));
+        receiver
+    }
+
+    fn packet(receiver: &Receiver<Vec<u8>>, opcode: u16, account: u32, offset: usize) -> Vec<u8> {
+        let packet = receiver.try_recv().unwrap();
+        assert_eq!(&packet[..2], &opcode.to_le_bytes());
+        assert_eq!(&packet[offset..offset + 4], &account.to_le_bytes());
+        packet
     }
 
     #[test]
-    fn map_tick_settles_arrival_without_a_second_move() {
+    fn loaded_players_enter_leave_and_reenter_mutual_visibility() {
         let now = Instant::now();
-        let arrival = now + Duration::from_millis(150);
-        let mut player = Player {
-            loaded: true,
-            tile: (1, 2),
-            walk: Some(((2, 2), arrival)),
+        let mut map = MapState::default();
+        let left_rx = open(&mut map, 7, (156, 191));
+        let right_rx = open(&mut map, 8, (170, 191));
+        assert!(map.loaded(7, now, 0));
+        assert_eq!(left_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        assert!(left_rx.try_recv().is_err());
+        assert!(map.loaded(8, now, 0));
+        assert_eq!(right_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        let entry = packet(&left_rx, 0x09ff, 8, 5);
+        assert_eq!(entry.len(), 108);
+        assert_eq!(&entry[2..4], &108u16.to_le_bytes());
+        assert_eq!(&entry[9..13], &108u32.to_le_bytes());
+        assert_eq!(&entry[0x54..0x5b], b"Player8");
+        packet(&right_rx, 0x09ff, 7, 5);
+
+        let arrival = now + Duration::from_millis(WALK_MILLIS);
+        map.players
+            .get_mut(&8)
+            .unwrap()
+            .steps
+            .push_back((arrival, (171, 191)));
+        map.advance(arrival, 150);
+        packet(&left_rx, 0x0080, 8, 2);
+        packet(&right_rx, 0x0080, 7, 2);
+
+        let returned = arrival + Duration::from_millis(WALK_MILLIS);
+        map.players
+            .get_mut(&8)
+            .unwrap()
+            .steps
+            .push_back((returned, (170, 191)));
+        map.advance(returned, 300);
+        packet(&left_rx, 0x09ff, 8, 5);
+        packet(&right_rx, 0x09ff, 7, 5);
+
+        map.players.remove(&8);
+        map.refresh_visibility(300);
+        packet(&left_rx, 0x0080, 8, 2);
+        let reconnected_rx = open(&mut map, 8, (156, 191));
+        assert!(map.loaded(8, returned, 300));
+        assert_eq!(reconnected_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        packet(&left_rx, 0x09ff, 8, 5);
+        packet(&reconnected_rx, 0x09ff, 7, 5);
+        assert!(left_rx.try_recv().is_err());
+        assert!(!map.loaded(8, returned, 300));
+    }
+
+    #[test]
+    fn duplicate_account_cannot_displace_an_existing_actor() {
+        let map = MapSessions::start(Instant::now(), None).unwrap();
+        let admit = |character| {
+            let (sender, receiver) = mpsc::sync_channel(8);
+            let session = map
+                .admit(
+                    wire::PlayerAppearance {
+                        account: 7,
+                        character,
+                        name: "Player".into(),
+                        job: 0,
+                        hair: 0,
+                        hair_color: 0,
+                        sex: 1,
+                    },
+                    (1, 2),
+                    4,
+                    sender,
+                )
+                .unwrap();
+            (session, receiver)
         };
-        player.advance(now);
-        assert_eq!(player.tile, (1, 2));
-        player.advance(arrival);
-        assert_eq!(player.tile, (2, 2));
-        assert!(player.walk.is_none());
+        let (first, first_rx) = admit(107);
+        let first = first.unwrap();
+        assert!(admit(109).0.is_none());
+        assert!(first.loaded().unwrap());
+        assert_eq!(first_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        drop(first);
+        let (next, next_rx) = admit(109);
+        assert!(next.unwrap().loaded().unwrap());
+        assert_eq!(next_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
     }
 }

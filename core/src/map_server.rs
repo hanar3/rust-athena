@@ -1,4 +1,6 @@
-use std::net::{SocketAddrV4, TcpStream};
+use std::net::{Shutdown, SocketAddrV4, TcpStream};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs, io::Write};
 
@@ -32,7 +34,7 @@ pub fn serve(db: Database, bind: SocketAddrV4) -> Result<()> {
         println!("Movement disabled. Set ATHENA_MAP_CACHE to enable it.");
     }
     let started = Instant::now();
-    let sessions = MapSessions::start(terrain)?;
+    let sessions = MapSessions::start(started, terrain)?;
     listener::serve(bind, Duration::from_secs(10), move |stream| {
         handle(&db, stream, started, &sessions)
     })
@@ -56,7 +58,22 @@ fn handle(
         return listener::drain(stream);
     }
 
-    let Some(session) = sessions.admit(entry.character, (SPAWN_X, SPAWN_Y))? else {
+    let Some(character) = db.character(entry.account, entry.character)? else {
+        stream.write_all(&wire::map_entry_refused())?;
+        return listener::drain(stream);
+    };
+    let appearance = wire::PlayerAppearance {
+        account: entry.account,
+        character: character.id,
+        name: character.name,
+        job: character.job,
+        hair: character.hair,
+        hair_color: character.hair_color,
+        sex: character.sex,
+    };
+    let (output, packets) = mpsc::sync_channel::<Vec<u8>>(128);
+    let Some(session) = sessions.admit(appearance, (SPAWN_X, SPAWN_Y), SPAWN_DIRECTION, output)?
+    else {
         stream.write_all(&wire::map_entry_refused())?;
         return listener::drain(stream);
     };
@@ -71,6 +88,18 @@ fn handle(
         SPAWN_Y,
         SPAWN_DIRECTION,
     ))?;
+    // Every post-admission packet goes through one writer. The map only enqueues.
+    let mut writer = stream.try_clone()?;
+    thread::Builder::new()
+        .name("map-writer".into())
+        .spawn(move || {
+            for packet in packets {
+                if writer.write_all(&packet).is_err() {
+                    break;
+                }
+            }
+            let _ = writer.shutdown(Shutdown::Both);
+        })?;
     let load_deadline = Instant::now() + LOAD_TIMEOUT;
     let mut loaded = false;
     loop {
@@ -91,7 +120,6 @@ fn handle(
         stream.set_read_timeout(Some(timeout))?;
         match wire::read_map_request(&mut stream)? {
             wire::MapRequest::Loaded => {
-                stream.write_all(&wire::MAP_LOAD_CONFIRMED)?;
                 if session.loaded()? {
                     loaded = true;
                     println!(
@@ -100,24 +128,15 @@ fn handle(
                     );
                 }
             }
-            wire::MapRequest::ConfirmLoad if loaded => {
-                stream.write_all(&wire::MAP_LOAD_CONFIRMED)?
-            }
+            wire::MapRequest::ConfirmLoad if loaded => session.send(wire::MAP_LOAD_CONFIRMED)?,
             wire::MapRequest::ConfirmLoad
             | wire::MapRequest::RemainingPlaytime
             | wire::MapRequest::CashShopCatalog => {}
-            wire::MapRequest::SyncTime => {
-                stream.write_all(&wire::map_time(server_tick(started)))?
-            }
-            wire::MapRequest::Ping => stream.write_all(&wire::MAP_PONG)?,
+            wire::MapRequest::SyncTime => session.send(wire::map_time(server_tick(started)))?,
+            wire::MapRequest::Ping => session.send(wire::MAP_PONG)?,
             wire::MapRequest::Move(x, y) => {
                 let destination = (x, y);
                 if let Some(position) = session.begin_walk(destination)? {
-                    stream.write_all(&wire::player_move(
-                        server_tick(started),
-                        position,
-                        destination,
-                    ))?;
                     println!(
                         "Character {} walking from {:?} to {:?}",
                         entry.character, position, destination
