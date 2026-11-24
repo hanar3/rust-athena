@@ -36,6 +36,14 @@ Directions are relative to the server. Multiple opcodes on one line belong to th
 | Map startup requests | `01c0` (2), `08c9` (2) | — | Consumed. The pinned rAthena table specifies two bytes for both. Rust Athena currently has an empty catalog. |
 | Map movement and actor visibility | `035f` (5) | `0087` (12), `09ff` and `09fd` (variable), `0080` (7) | Client-confirmed self movement. Two-client TCP tested appearance and visibility. Map state is in memory. Position writes on disconnect. |
 
+## Confirmed gaps
+
+| Exchange | Client request | Server reply | Evidence and remaining work |
+| --- | --- | --- | --- |
+| Quit from the map | `018a` (4) | `018b` (4), result 0 allows quit and result 1 denies it | Rodecomp sends the request from its Quit action and closes after a successful reply. Rust Athena treats the request as unsupported, although the existing disconnect path can save the last reached tile. Add the quit exchange and verify position restoration. Returning to character select is a separate exchange. |
+
+[rAthena quit handling](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11435) · [Rodecomp quit request](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameMode.cpp#L1831) · [Rodecomp acknowledgement handling](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L26628)
+
 ## Reconciliation workflow
 
 Start with one exchange, then trace its client send and receive paths, rAthena's active packet registration and handler, and our implementation. Record framing, state transitions, refusal behavior, and which values must survive restarts. File a contributor-ready issue for behavior that is missing or partial, and link the implementing PR and verification result back to the inventory notes. Preserve reference disagreements until they are resolved by target-version behavior. An opcode with no reviewed exchange is unresolved, even when both references name it.
