@@ -1,5 +1,5 @@
 use std::net::{Shutdown, SocketAddrV4, TcpStream};
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs, io::Write};
@@ -34,19 +34,9 @@ pub fn serve(db: Database, bind: SocketAddrV4) -> Result<()> {
         println!("Movement disabled. Set ATHENA_MAP_CACHE to enable it.");
     }
     let started = Instant::now();
-    let sessions = Arc::new(MapSessions::new(started));
-    let map = Arc::downgrade(&sessions);
-    thread::Builder::new()
-        .name("map-tick".into())
-        .spawn(move || {
-            while let Some(sessions) = map.upgrade() {
-                sessions.advance(Instant::now());
-                drop(sessions);
-                thread::sleep(Duration::from_millis(25));
-            }
-        })?;
+    let sessions = MapSessions::start(started, terrain)?;
     listener::serve(bind, Duration::from_secs(10), move |stream| {
-        handle(&db, stream, started, terrain.as_ref(), &sessions)
+        handle(&db, stream, started, &sessions)
     })
 }
 
@@ -54,7 +44,6 @@ fn handle(
     db: &Database,
     mut stream: TcpStream,
     started: Instant,
-    terrain: Option<&Terrain>,
     sessions: &MapSessions,
 ) -> Result<()> {
     let entry = wire::read_map_entry(&mut stream)?;
@@ -83,7 +72,7 @@ fn handle(
         sex: character.sex,
     };
     let (output, packets) = mpsc::sync_channel::<Vec<u8>>(128);
-    let Some(session) = sessions.admit(appearance, (SPAWN_X, SPAWN_Y), SPAWN_DIRECTION, output)
+    let Some(session) = sessions.admit(appearance, (SPAWN_X, SPAWN_Y), SPAWN_DIRECTION, output)?
     else {
         stream.write_all(&wire::map_entry_refused())?;
         return listener::drain(stream);
@@ -131,8 +120,7 @@ fn handle(
         stream.set_read_timeout(Some(timeout))?;
         match wire::read_map_request(&mut stream)? {
             wire::MapRequest::Loaded => {
-                session.send(wire::MAP_LOAD_CONFIRMED);
-                if session.loaded(Instant::now()) {
+                if session.loaded()? {
                     loaded = true;
                     println!(
                         "Character {} loaded {} at ({}, {})",
@@ -140,22 +128,15 @@ fn handle(
                     );
                 }
             }
-            wire::MapRequest::ConfirmLoad if loaded => {
-                stream.write_all(&wire::MAP_LOAD_CONFIRMED)?
-            }
+            wire::MapRequest::ConfirmLoad if loaded => session.send(wire::MAP_LOAD_CONFIRMED)?,
             wire::MapRequest::ConfirmLoad
             | wire::MapRequest::RemainingPlaytime
             | wire::MapRequest::CashShopCatalog => {}
-            wire::MapRequest::SyncTime => {
-                stream.write_all(&wire::map_time(server_tick(started)))?
-            }
-            wire::MapRequest::Ping => session.send(wire::MAP_PONG),
+            wire::MapRequest::SyncTime => session.send(wire::map_time(server_tick(started)))?,
+            wire::MapRequest::Ping => session.send(wire::MAP_PONG)?,
             wire::MapRequest::Move(x, y) => {
-                let Some(terrain) = terrain.filter(|_| loaded) else {
-                    continue;
-                };
                 let destination = (x, y);
-                if let Some(position) = session.begin_walk(terrain, Instant::now(), destination) {
+                if let Some(position) = session.begin_walk(destination)? {
                     println!(
                         "Character {} walking from {:?} to {:?}",
                         entry.character, position, destination

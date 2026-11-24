@@ -1,17 +1,28 @@
 //! A map process owns its live sessions. A connection holds a lease on one session.
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
-use std::sync::{mpsc::SyncSender, Mutex};
+use std::io;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::protocol::v20260219 as wire;
 use crate::terrain::{Terrain, Tile, WALK_MILLIS};
 
 const SIGHT: u16 = 14;
+const COMMAND_CAPACITY: usize = 128;
+const TICK_INTERVAL: Duration = Duration::from_millis(25);
 
 pub struct MapSessions {
-    started: Instant,
-    state: Mutex<MapState>,
+    commands: SyncSender<Command>,
+}
+
+enum Command {
+    Admit(Player, SyncSender<bool>),
+    Loaded(u32, SyncSender<bool>),
+    Walk(u32, Tile, SyncSender<Option<Tile>>),
+    Reply(u32, Vec<u8>),
+    Disconnect(u32),
 }
 
 #[derive(Default)]
@@ -122,19 +133,12 @@ impl MapState {
 }
 
 impl MapSessions {
-    pub fn new(started: Instant) -> Self {
-        Self {
-            started,
-            state: Mutex::default(),
-        }
-    }
-
-    fn tick(&self, now: Instant) -> u32 {
-        now.duration_since(self.started).as_millis() as u32
-    }
-
-    pub fn advance(&self, now: Instant) {
-        self.state.lock().unwrap().advance(now, self.tick(now));
+    pub fn start(started: Instant, terrain: Option<Terrain>) -> io::Result<Self> {
+        let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
+        thread::Builder::new()
+            .name("map-loop".into())
+            .spawn(move || run(receiver, started, terrain))?;
+        Ok(Self { commands })
     }
 
     pub fn admit(
@@ -143,22 +147,75 @@ impl MapSessions {
         spawn: Tile,
         direction: u8,
         output: SyncSender<Vec<u8>>,
-    ) -> Option<Session<'_>> {
+    ) -> io::Result<Option<Session<'_>>> {
         let account = appearance.account;
-        let mut state = self.state.lock().unwrap();
-        let Entry::Vacant(entry) = state.players.entry(account) else {
-            return None;
-        };
-        entry.insert(Player {
+        let player = Player {
             appearance,
             output: Some(output),
             loaded: false,
             tile: spawn,
             direction,
             steps: VecDeque::new(),
-        });
-        Some(Session { map: self, account })
+        };
+        let admitted = self.request(|reply| Command::Admit(player, reply))?;
+        Ok(admitted.then(|| Session { map: self, account }))
     }
+
+    fn request<T>(&self, command: impl FnOnce(SyncSender<T>) -> Command) -> io::Result<T> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.send(command(reply))?;
+        result.recv().map_err(|_| map_stopped())
+    }
+
+    fn send(&self, command: Command) -> io::Result<()> {
+        self.commands.send(command).map_err(|_| map_stopped())
+    }
+}
+
+fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) {
+    let tick = |now: Instant| now.duration_since(started).as_millis() as u32;
+    let mut state = MapState::default();
+    let mut next_tick = Instant::now() + TICK_INTERVAL;
+    loop {
+        let now = Instant::now();
+        if now >= next_tick {
+            state.advance(now, tick(now));
+            next_tick = now + TICK_INTERVAL;
+        }
+        let command = match commands.recv_timeout(next_tick.saturating_duration_since(now)) {
+            Ok(command) => command,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let now = Instant::now();
+        match command {
+            Command::Admit(player, reply) => {
+                let _ = reply.send(state.admit(player));
+            }
+            Command::Loaded(account, reply) => {
+                let _ = reply.send(state.loaded(account, now, tick(now)));
+            }
+            Command::Walk(account, destination, reply) => {
+                let source = terrain.as_ref().and_then(|terrain| {
+                    state.begin_walk(account, terrain, now, tick(now), destination)
+                });
+                let _ = reply.send(source);
+            }
+            Command::Reply(account, packet) => {
+                if let Some(player) = state.players.get_mut(&account) {
+                    player.send(packet);
+                }
+            }
+            Command::Disconnect(account) => {
+                state.players.remove(&account);
+                state.refresh_visibility(tick(now));
+            }
+        }
+    }
+}
+
+fn map_stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "map loop stopped")
 }
 
 /// A live connection's exclusive lease. Its account ID is also its wire actor ID.
@@ -168,34 +225,59 @@ pub struct Session<'a> {
 }
 
 impl Session<'_> {
-    pub fn send(&self, packet: impl Into<Vec<u8>>) {
-        self.map
-            .state
-            .lock()
-            .unwrap()
-            .players
-            .get_mut(&self.account)
-            .unwrap()
-            .send(packet.into());
+    pub fn send(&self, packet: impl Into<Vec<u8>>) -> io::Result<()> {
+        self.map.send(Command::Reply(self.account, packet.into()))
     }
 
-    pub fn loaded(&self, now: Instant) -> bool {
-        let mut state = self.map.state.lock().unwrap();
-        let tick = self.map.tick(now);
-        state.advance(now, tick);
-        let player = state.players.get_mut(&self.account).unwrap();
-        if std::mem::replace(&mut player.loaded, true) {
+    pub fn loaded(&self) -> io::Result<bool> {
+        self.map
+            .request(|reply| Command::Loaded(self.account, reply))
+    }
+
+    pub fn begin_walk(&self, target: Tile) -> io::Result<Option<Tile>> {
+        self.map
+            .request(|reply| Command::Walk(self.account, target, reply))
+    }
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        let _ = self.map.send(Command::Disconnect(self.account));
+    }
+}
+
+impl MapState {
+    fn admit(&mut self, player: Player) -> bool {
+        let Entry::Vacant(entry) = self.players.entry(player.appearance.account) else {
             return false;
-        }
-        state.refresh_visibility(tick);
+        };
+        entry.insert(player);
         true
     }
 
-    pub fn begin_walk(&self, terrain: &Terrain, now: Instant, target: Tile) -> Option<Tile> {
-        let mut state = self.map.state.lock().unwrap();
-        let tick = self.map.tick(now);
-        state.advance(now, tick);
-        let player = state.players.get_mut(&self.account).unwrap();
+    fn loaded(&mut self, account: u32, now: Instant, tick: u32) -> bool {
+        self.advance(now, tick);
+        let Some(player) = self.players.get_mut(&account) else {
+            return false;
+        };
+        player.send(wire::MAP_LOAD_CONFIRMED.to_vec());
+        if std::mem::replace(&mut player.loaded, true) {
+            return false;
+        }
+        self.refresh_visibility(tick);
+        true
+    }
+
+    fn begin_walk(
+        &mut self,
+        account: u32,
+        terrain: &Terrain,
+        now: Instant,
+        tick: u32,
+        target: Tile,
+    ) -> Option<Tile> {
+        self.advance(now, tick);
+        let player = self.players.get_mut(&account)?;
         if !player.loaded || !player.steps.is_empty() {
             return None;
         }
@@ -216,11 +298,11 @@ impl Session<'_> {
         player.send(wire::player_move(tick, source, target).to_vec());
 
         let packet = player.entry_packet(tick);
-        let MapState { visible, players } = &mut *state;
+        let MapState { visible, players } = self;
         for &(left, right) in visible.iter() {
-            let viewer = if left == self.account {
+            let viewer = if left == account {
                 right
-            } else if right == self.account {
+            } else if right == account {
                 left
             } else {
                 continue;
@@ -231,38 +313,30 @@ impl Session<'_> {
     }
 }
 
-impl Drop for Session<'_> {
-    fn drop(&mut self) {
-        let mut state = self.map.state.lock().unwrap();
-        state.players.remove(&self.account);
-        state.refresh_visibility(self.map.tick(Instant::now()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc::{self, Receiver};
 
-    fn open(map: &MapSessions, account: u32, tile: Tile) -> (Session<'_>, Receiver<Vec<u8>>) {
+    fn open(map: &mut MapState, account: u32, tile: Tile) -> Receiver<Vec<u8>> {
         let (sender, receiver) = mpsc::sync_channel(8);
-        let session = map
-            .admit(
-                wire::PlayerAppearance {
-                    account,
-                    character: account + 100,
-                    name: format!("Player{}", account),
-                    job: 4218,
-                    hair: 3,
-                    hair_color: 2,
-                    sex: 1,
-                },
-                tile,
-                4,
-                sender,
-            )
-            .unwrap();
-        (session, receiver)
+        assert!(map.admit(Player {
+            appearance: wire::PlayerAppearance {
+                account,
+                character: account + 100,
+                name: format!("Player{}", account),
+                job: 4218,
+                hair: 3,
+                hair_color: 2,
+                sex: 1
+            },
+            output: Some(sender),
+            loaded: false,
+            tile,
+            direction: 4,
+            steps: VecDeque::new(),
+        }));
+        receiver
     }
 
     fn packet(receiver: &Receiver<Vec<u8>>, opcode: u16, account: u32, offset: usize) -> Vec<u8> {
@@ -275,12 +349,14 @@ mod tests {
     #[test]
     fn loaded_players_enter_leave_and_reenter_mutual_visibility() {
         let now = Instant::now();
-        let map = MapSessions::new(now);
-        let (left, left_rx) = open(&map, 7, (156, 191));
-        let (right, right_rx) = open(&map, 8, (170, 191));
-        assert!(left.loaded(now));
+        let mut map = MapState::default();
+        let left_rx = open(&mut map, 7, (156, 191));
+        let right_rx = open(&mut map, 8, (170, 191));
+        assert!(map.loaded(7, now, 0));
+        assert_eq!(left_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
         assert!(left_rx.try_recv().is_err());
-        assert!(right.loaded(now));
+        assert!(map.loaded(8, now, 0));
+        assert_eq!(right_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
         let entry = packet(&left_rx, 0x09ff, 8, 5);
         assert_eq!(entry.len(), 108);
         assert_eq!(&entry[2..4], &108u16.to_le_bytes());
@@ -289,65 +365,68 @@ mod tests {
         packet(&right_rx, 0x09ff, 7, 5);
 
         let arrival = now + Duration::from_millis(WALK_MILLIS);
-        map.state
-            .lock()
-            .unwrap()
-            .players
+        map.players
             .get_mut(&8)
             .unwrap()
             .steps
             .push_back((arrival, (171, 191)));
-        map.advance(arrival);
+        map.advance(arrival, 150);
         packet(&left_rx, 0x0080, 8, 2);
         packet(&right_rx, 0x0080, 7, 2);
 
         let returned = arrival + Duration::from_millis(WALK_MILLIS);
-        map.state
-            .lock()
-            .unwrap()
-            .players
+        map.players
             .get_mut(&8)
             .unwrap()
             .steps
             .push_back((returned, (170, 191)));
-        map.advance(returned);
+        map.advance(returned, 300);
         packet(&left_rx, 0x09ff, 8, 5);
         packet(&right_rx, 0x09ff, 7, 5);
 
-        drop(right);
+        map.players.remove(&8);
+        map.refresh_visibility(300);
         packet(&left_rx, 0x0080, 8, 2);
-        let (reconnected, reconnected_rx) = open(&map, 8, (156, 191));
-        assert!(reconnected.loaded(returned));
+        let reconnected_rx = open(&mut map, 8, (156, 191));
+        assert!(map.loaded(8, returned, 300));
+        assert_eq!(reconnected_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
         packet(&left_rx, 0x09ff, 8, 5);
         packet(&reconnected_rx, 0x09ff, 7, 5);
         assert!(left_rx.try_recv().is_err());
-        assert!(!reconnected.loaded(returned));
+        assert!(!map.loaded(8, returned, 300));
     }
 
     #[test]
     fn duplicate_account_cannot_displace_an_existing_actor() {
-        let map = MapSessions::new(Instant::now());
-        let (first, _) = open(&map, 7, (1, 2));
-        let (output, _) = mpsc::sync_channel(8);
-        assert!(map
-            .admit(
-                wire::PlayerAppearance {
-                    account: 7,
-                    character: 109,
-                    name: "Duplicate".into(),
-                    job: 0,
-                    hair: 0,
-                    hair_color: 0,
-                    sex: 1,
-                },
-                (3, 4),
-                4,
-                output
-            )
-            .is_none());
-        assert_eq!(map.state.lock().unwrap().players[&7].tile, (1, 2));
+        let map = MapSessions::start(Instant::now(), None).unwrap();
+        let admit = |character| {
+            let (sender, receiver) = mpsc::sync_channel(8);
+            let session = map
+                .admit(
+                    wire::PlayerAppearance {
+                        account: 7,
+                        character,
+                        name: "Player".into(),
+                        job: 0,
+                        hair: 0,
+                        hair_color: 0,
+                        sex: 1,
+                    },
+                    (1, 2),
+                    4,
+                    sender,
+                )
+                .unwrap();
+            (session, receiver)
+        };
+        let (first, first_rx) = admit(107);
+        let first = first.unwrap();
+        assert!(admit(109).0.is_none());
+        assert!(first.loaded().unwrap());
+        assert_eq!(first_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
         drop(first);
-        let (_second, _) = open(&map, 7, (3, 4));
-        assert_eq!(map.state.lock().unwrap().players[&7].tile, (3, 4));
+        let (next, next_rx) = admit(109);
+        assert!(next.unwrap().loaded().unwrap());
+        assert_eq!(next_rx.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
     }
 }
