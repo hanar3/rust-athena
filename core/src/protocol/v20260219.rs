@@ -336,6 +336,7 @@ pub enum MapRequest {
     ConfirmLoad,
     RemainingPlaytime,
     CashShopCatalog,
+    Quit,
     Move(u16, u16),
 }
 
@@ -350,6 +351,10 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
         0x0447 => Ok(MapRequest::ConfirmLoad),
         0x01c0 => Ok(MapRequest::RemainingPlaytime),
         0x08c9 => Ok(MapRequest::CashShopCatalog),
+        0x018a => {
+            reader.read_exact(&mut [0; 2])?;
+            Ok(MapRequest::Quit)
+        }
         0x035f => {
             let mut position = [0; 3];
             reader.read_exact(&mut position)?;
@@ -449,12 +454,36 @@ pub fn map_time(tick: u32) -> [u8; 6] {
     reply
 }
 
+pub fn map_quit_ack(allowed: bool) -> [u8; 4] {
+    [0x8b, 0x01, u8::from(!allowed), 0]
+}
+
 pub const MAP_LOAD_CONFIRMED: [u8; 2] = 0x0b1bu16.to_le_bytes();
 pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_request_consumes_its_full_frame() {
+        let mut input: &[u8] = &[0x8a, 0x01, 0, 0, 0x1c, 0x0b];
+        assert!(matches!(
+            read_map_request(&mut input).unwrap(),
+            MapRequest::Quit
+        ));
+        assert!(matches!(
+            read_map_request(&mut input).unwrap(),
+            MapRequest::Ping
+        ));
+        assert_eq!(map_quit_ack(true), [0x8b, 0x01, 0, 0]);
+        assert_eq!(map_quit_ack(false), [0x8b, 0x01, 1, 0]);
+        let mut truncated: &[u8] = &[0x8a, 0x01, 0];
+        assert_eq!(
+            read_map_request(&mut truncated).err().unwrap().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
 
     #[test]
     fn startup_requests_keep_following_move_aligned() {

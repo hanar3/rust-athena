@@ -36,13 +36,13 @@ Directions are relative to the server. Multiple opcodes on one line belong to th
 | Map startup requests | `01c0` (2), `08c9` (2) | — | Consumed. The pinned rAthena table specifies two bytes for both. Rust Athena currently has an empty catalog. |
 | Map movement and actor visibility | `035f` (5) | `0087` (12), `09ff` and `09fd` (variable), `0080` (7) | Client-confirmed self movement. Two-client TCP tested appearance and visibility. Map state is in memory. Position writes on disconnect. |
 
-## Confirmed gaps
+## Map quit
 
-| Exchange | Client request | Server reply | Evidence and remaining work |
+| Exchange | Client request | Server reply | Behavior and evidence |
 | --- | --- | --- | --- |
-| Quit from the map | `018a` (4) | `018b` (4), result 0 allows quit and result 1 denies it | Rodecomp sends the request from its Quit action and closes after a successful reply. Rust Athena treats the request as unsupported, although the existing disconnect path can save the last reached tile. Add the quit exchange and verify position restoration. Returning to character select is a separate exchange. |
+| Quit from the map | `018a` (4) | `018b` (4), result 0 allows quit and result 1 denies it | Rodecomp sends the request from its Quit action and closes after a successful reply. Rust Athena accepts quit after map load, saves the last reached tile before sending success, and denies the request before load. Codec and local TCP/MariaDB checks passed. A live Rodecomp check is pending. Returning to character select is a separate exchange. |
 
-[rAthena quit handling](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11435) · [Rodecomp quit request](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameMode.cpp#L1831) · [Rodecomp acknowledgement handling](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L26628)
+[Issue #9](https://github.com/hanar3/rust-athena/issues/9) · [rAthena quit handling](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11435) · [Rodecomp quit request](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameMode.cpp#L1831) · [Rodecomp acknowledgement handling](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L26628)
 
 ## Reconciliation workflow
 
