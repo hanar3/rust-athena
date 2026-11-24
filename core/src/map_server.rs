@@ -32,9 +32,9 @@ pub fn serve(db: Database, bind: SocketAddrV4) -> Result<()> {
         println!("Movement disabled. Set ATHENA_MAP_CACHE to enable it.");
     }
     let started = Instant::now();
-    let sessions = MapSessions::default();
+    let sessions = MapSessions::start(terrain)?;
     listener::serve(bind, Duration::from_secs(10), move |stream| {
-        handle(&db, stream, started, terrain.as_ref(), &sessions)
+        handle(&db, stream, started, &sessions)
     })
 }
 
@@ -42,7 +42,6 @@ fn handle(
     db: &Database,
     mut stream: TcpStream,
     started: Instant,
-    terrain: Option<&Terrain>,
     sessions: &MapSessions,
 ) -> Result<()> {
     let entry = wire::read_map_entry(&mut stream)?;
@@ -57,7 +56,7 @@ fn handle(
         return listener::drain(stream);
     }
 
-    let Some(session) = sessions.admit(entry.character, (SPAWN_X, SPAWN_Y)) else {
+    let Some(session) = sessions.admit(entry.character, (SPAWN_X, SPAWN_Y))? else {
         stream.write_all(&wire::map_entry_refused())?;
         return listener::drain(stream);
     };
@@ -93,14 +92,11 @@ fn handle(
         match wire::read_map_request(&mut stream)? {
             wire::MapRequest::Loaded => {
                 stream.write_all(&wire::MAP_LOAD_CONFIRMED)?;
-                if session.loaded() {
+                if session.loaded()? {
                     loaded = true;
-                    let (x, y) = sessions
-                        .active_position(entry.character, Instant::now())
-                        .unwrap();
                     println!(
                         "Character {} loaded {} at ({}, {})",
-                        entry.character, START_MAP, x, y
+                        entry.character, START_MAP, SPAWN_X, SPAWN_Y
                     );
                 }
             }
@@ -115,11 +111,8 @@ fn handle(
             }
             wire::MapRequest::Ping => stream.write_all(&wire::MAP_PONG)?,
             wire::MapRequest::Move(x, y) => {
-                let Some(terrain) = terrain.filter(|_| loaded) else {
-                    continue;
-                };
                 let destination = (x, y);
-                if let Some(position) = session.begin_walk(terrain, Instant::now(), destination) {
+                if let Some(position) = session.begin_walk(destination)? {
                     stream.write_all(&wire::player_move(
                         server_tick(started),
                         position,
