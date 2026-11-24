@@ -7,7 +7,11 @@ use std::{env, fs, io::Write};
 use rust_athena_db::Database;
 
 use crate::{
-    listener, map_sessions::MapSessions, protocol::v20260219 as wire, terrain::Terrain, Result,
+    listener,
+    map_sessions::{MapSessions, Session},
+    protocol::v20260219 as wire,
+    terrain::{Terrain, Tile},
+    Result,
 };
 
 pub const START_MAP: &str = "prontera.gat";
@@ -77,6 +81,12 @@ fn handle(
         stream.write_all(&wire::map_entry_refused())?;
         return listener::drain(stream);
     };
+    // Read after admission. The prior connection holds its lease until its save finishes.
+    let spawn = session.restore_position(db.character_position(
+        entry.account,
+        entry.character,
+        START_MAP,
+    )?)?;
     stream.write_all(&wire::map_account_ack(entry.account))?;
     println!(
         "Accepted map handoff for character {} to {}",
@@ -84,8 +94,8 @@ fn handle(
     );
     stream.write_all(&wire::map_accepted(
         server_tick(started),
-        SPAWN_X,
-        SPAWN_Y,
+        spawn.0,
+        spawn.1,
         SPAWN_DIRECTION,
     ))?;
     // Every post-admission packet goes through one writer. The map only enqueues.
@@ -100,6 +110,21 @@ fn handle(
             }
             let _ = writer.shutdown(Shutdown::Both);
         })?;
+    let connection = run_session(stream, started, &session, entry.character, spawn);
+    // This runs on the connection thread, including when the peer resets the socket.
+    if let Some(tile) = session.finish()? {
+        db.save_character_position(entry.account, entry.character, START_MAP, tile)?;
+    }
+    connection
+}
+
+fn run_session(
+    mut stream: TcpStream,
+    started: Instant,
+    session: &Session<'_>,
+    character: u32,
+    spawn: Tile,
+) -> Result<()> {
     let load_deadline = Instant::now() + LOAD_TIMEOUT;
     let mut loaded = false;
     loop {
@@ -124,7 +149,7 @@ fn handle(
                     loaded = true;
                     println!(
                         "Character {} loaded {} at ({}, {})",
-                        entry.character, START_MAP, SPAWN_X, SPAWN_Y
+                        character, START_MAP, spawn.0, spawn.1
                     );
                 }
             }
@@ -139,7 +164,7 @@ fn handle(
                 if let Some(position) = session.begin_walk(destination)? {
                     println!(
                         "Character {} walking from {:?} to {:?}",
-                        entry.character, position, destination
+                        character, position, destination
                     );
                 }
             }

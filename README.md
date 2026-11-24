@@ -17,7 +17,7 @@ docker compose up -d db
 export DATABASE_URL='mysql://ragnarok:ragnarok@127.0.0.1:3306/ragnarok'
 ```
 
-On a fresh database, apply all three migrations in this order after MariaDB finishes initializing. If the original `users` migration is already applied, start with the second migration. It requires unique usernames under the database collation. Review existing duplicates before running it. Old password values must already be bcrypt hashes to work with the login server. If the game-server migration is also applied, run only the map-transfer migration.
+On a fresh database, apply all four migrations in this order after MariaDB finishes initializing. If the original `users` migration is already applied, start with the second migration. It requires unique usernames under the database collation. Review existing duplicates before running it. Old password values must already be bcrypt hashes to work with the login server. For an existing database, apply only the migrations you have yet to run. If you already run the map server, apply the last migration before starting the updated processes.
 
 ```sh
 docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
@@ -26,6 +26,8 @@ docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
   < db/migrations/2026-11-23-000000_game_servers/up.sql
 docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
   < db/migrations/2026-11-23-000001_map_transfers/up.sql
+docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
+  < db/migrations/2026-11-23-000002_character_positions/up.sql
 cargo build --locked
 ```
 
@@ -57,7 +59,7 @@ Build the current binary and start the map process with an rAthena renewal map c
 ATHENA_MAP_CACHE=/path/to/rathena/db/re/map_cache.dat target/debug/rust-athena map
 ```
 
-When the server logs `Loaded walkability for prontera.gat`, connect and select a character. Click a nearby open tile, let the character arrive, and click again. Each accepted move logs its start and destination. Movement is limited to a route of up to 14 tiles. Walls, out-of-bounds destinations, and clicks while a walk is active are ignored. Reconnecting starts the character at the fixed spawn again.
+When the server logs `Loaded walkability for prontera.gat`, connect and select a character. Click a nearby open tile, let the character arrive, and click again. Each accepted move logs its start and destination. Movement is limited to a route of up to 14 tiles. Walls, out-of-bounds destinations, and clicks while a walk is active are ignored. After disconnecting, reconnect to resume at the last tile reached in Prontera. Characters without a usable saved position start at (156, 191).
 
 ## Configuration
 

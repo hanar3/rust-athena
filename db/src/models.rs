@@ -18,6 +18,8 @@ pub struct Character {
     pub hair_color: i16,
     pub sex: u8,
     pub map_name: String,
+    pub last_x: Option<u16>,
+    pub last_y: Option<u16>,
 }
 
 #[derive(Insertable)]

@@ -19,5 +19,7 @@ table! {
         hair_color -> SmallInt,
         sex -> Unsigned<TinyInt>,
         map_name -> Varchar,
+        last_x -> Nullable<Unsigned<SmallInt>>,
+        last_y -> Nullable<Unsigned<SmallInt>>,
     }
 }

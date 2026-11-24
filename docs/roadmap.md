@@ -56,6 +56,8 @@ Every implementation issue should include:
 
 **Files to read.** Rust Athena [map role](../core/src/map_server.rs) and [wire module](../core/src/protocol/v20260219.rs). rAthena [actor entry and visibility packets](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp), [movement lifecycle](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/unit.cpp). Rodecomp [actor entry and removal handlers](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp), [actor initialization](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/EntityInit.cpp).
 
+[Issue #5](https://github.com/hanar3/rust-athena/issues/5) starts persistent travel by saving and restoring the last reached tile in Prontera.
+
 ## Parity decision
 
 Choose what will count as full emulation before treating this as a finite release plan. Protocol coverage measures which requests and replies work. Gameplay parity also requires matching rules, content and persistence across player scenarios. The milestone sequence supports either target while the feature inventory is built.
