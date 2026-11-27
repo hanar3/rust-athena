@@ -337,6 +337,7 @@ pub enum MapRequest {
     RemainingPlaytime,
     CashShopCatalog,
     Quit,
+    Face { head: u16, body: u8 },
     Move(u16, u16),
 }
 
@@ -354,6 +355,14 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
         0x018a => {
             reader.read_exact(&mut [0; 2])?;
             Ok(MapRequest::Quit)
+        }
+        0x0361 => {
+            let mut fields = [0; 3];
+            reader.read_exact(&mut fields)?;
+            Ok(MapRequest::Face {
+                head: u16::from_le_bytes([fields[0], fields[1]]),
+                body: fields[2],
+            })
         }
         0x035f => {
             let mut position = [0; 3];
@@ -397,10 +406,18 @@ pub struct PlayerAppearance {
     pub sex: u8,
 }
 
+pub fn player_facing(account: u32, head: u16, body: u8) -> [u8; 9] {
+    let mut packet = [0x9c, 0, 0, 0, 0, 0, 0, 0, body];
+    packet[2..6].copy_from_slice(&account.to_le_bytes());
+    packet[6..8].copy_from_slice(&head.to_le_bytes());
+    packet
+}
+
 pub fn visible_player(
     actor: &PlayerAppearance,
     (x, y): (u16, u16),
     direction: u8,
+    head_direction: u16,
     walk: Option<(u32, (u16, u16))>,
 ) -> Vec<u8> {
     let (opcode, name_offset, palette_offset, sex_offset) = if walk.is_some() {
@@ -417,8 +434,7 @@ pub fn visible_player(
     reply[0x17..0x19].copy_from_slice(&actor.job.to_le_bytes());
     reply[0x19..0x1b].copy_from_slice(&actor.hair.to_le_bytes());
     reply[palette_offset..palette_offset + 2].copy_from_slice(&actor.hair_color.to_le_bytes());
-    reply[palette_offset + 4..palette_offset + 6]
-        .copy_from_slice(&u16::from(direction).to_le_bytes());
+    reply[palette_offset + 4..palette_offset + 6].copy_from_slice(&head_direction.to_le_bytes());
     reply[sex_offset] = actor.sex;
     let level_offset = if let Some((tick, destination)) = walk {
         reply[0x25..0x29].copy_from_slice(&tick.to_le_bytes());
@@ -464,6 +480,23 @@ pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facing_request_and_reply_match_client_layout() {
+        let mut input: &[u8] = &[0x61, 0x03, 2, 0, 7, 0x1c, 0x0b];
+        assert!(matches!(
+            read_map_request(&mut input).unwrap(),
+            MapRequest::Face { head: 2, body: 7 }
+        ));
+        assert!(matches!(
+            read_map_request(&mut input).unwrap(),
+            MapRequest::Ping
+        ));
+        assert_eq!(
+            player_facing(0x12345678, 2, 7),
+            [0x9c, 0, 0x78, 0x56, 0x34, 0x12, 2, 0, 7]
+        );
+    }
 
     #[test]
     fn quit_request_consumes_its_full_frame() {

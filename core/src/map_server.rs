@@ -164,6 +164,7 @@ fn run_session(
             wire::MapRequest::Ping => session.send(wire::MAP_PONG)?,
             wire::MapRequest::Quit if loaded => return Ok(()),
             wire::MapRequest::Quit => session.send(wire::map_quit_ack(false))?,
+            wire::MapRequest::Face { head, body } => session.face(head, body)?,
             wire::MapRequest::Move(x, y) => {
                 let destination = (x, y);
                 if let Some(position) = session.begin_walk(destination)? {
