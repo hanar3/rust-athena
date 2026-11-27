@@ -17,7 +17,7 @@ docker compose up -d db
 export DATABASE_URL='mysql://ragnarok:ragnarok@127.0.0.1:3306/ragnarok'
 ```
 
-On a fresh database, apply all four migrations in this order after MariaDB finishes initializing. If the original `users` migration is already applied, start with the second migration. It requires unique usernames under the database collation. Review existing duplicates before running it. Old password values must already be bcrypt hashes to work with the login server. For an existing database, apply only the migrations you have yet to run. If you already run the map server, apply the last migration before starting the updated processes.
+On a fresh database, apply the migrations in this order after MariaDB finishes initializing. If the original `users` migration is already applied, start with the second migration. It requires unique usernames under the database collation. Review existing duplicates before running it. Old password values must already be bcrypt hashes to work with the login server. For an existing database, apply only the migrations you have yet to run. Apply the map return credentials migration before starting the updated character and map processes.
 
 ```sh
 docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
@@ -28,6 +28,8 @@ docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
   < db/migrations/2026-11-23-000001_map_transfers/up.sql
 docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
   < db/migrations/2026-11-23-000002_character_positions/up.sql
+docker compose exec -T db mariadb -uragnarok -pragnarok ragnarok \
+  < db/migrations/2026-11-27-000000_map_return_credentials/up.sql
 cargo build --locked
 ```
 

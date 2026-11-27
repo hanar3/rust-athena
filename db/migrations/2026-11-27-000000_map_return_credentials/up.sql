@@ -1,0 +1,3 @@
+ALTER TABLE map_transfers
+    ADD COLUMN login_id2 INT UNSIGNED NULL,
+    ADD COLUMN account_sex TINYINT UNSIGNED NULL;

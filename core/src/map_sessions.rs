@@ -25,7 +25,7 @@ enum Command {
     Walk(u32, Tile, SyncSender<Option<Tile>>),
     Face(u32, u16, u8),
     Reply(u32, Vec<u8>),
-    Disconnect(u32),
+    Disconnect(u32, Option<Vec<u8>>),
 }
 
 #[derive(Default)]
@@ -169,7 +169,11 @@ impl MapSessions {
             steps: VecDeque::new(),
         };
         let admitted = self.request(|reply| Command::Admit(player, reply))?;
-        Ok(admitted.then(|| Session { map: self, account }))
+        Ok(admitted.then(|| Session {
+            map: self,
+            account,
+            active: true,
+        }))
     }
 
     fn request<T>(&self, command: impl FnOnce(SyncSender<T>) -> Command) -> io::Result<T> {
@@ -231,9 +235,12 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
                     player.send(packet);
                 }
             }
-            Command::Disconnect(account) => {
-                state.players.remove(&account);
+            Command::Disconnect(account, reply) => {
+                let player = state.players.remove(&account);
                 state.refresh_visibility(tick(now));
+                if let (Some(mut player), Some(reply)) = (player, reply) {
+                    player.send(reply);
+                }
             }
         }
     }
@@ -251,11 +258,19 @@ fn map_stopped() -> io::Error {
 pub struct Session<'a> {
     map: &'a MapSessions,
     account: u32,
+    active: bool,
 }
 
 impl Session<'_> {
     pub fn send(&self, packet: impl Into<Vec<u8>>) -> io::Result<()> {
         self.map.send(Command::Reply(self.account, packet.into()))
+    }
+
+    /// Release the account before the writer can send the final packet.
+    pub fn close_with_reply(mut self, reply: impl Into<Vec<u8>>) -> io::Result<()> {
+        self.active = false;
+        self.map
+            .send(Command::Disconnect(self.account, Some(reply.into())))
     }
 
     pub fn restore_position(&self, saved: Option<Tile>) -> io::Result<Tile> {
@@ -286,7 +301,9 @@ impl Session<'_> {
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
-        let _ = self.map.send(Command::Disconnect(self.account));
+        if self.active {
+            let _ = self.map.send(Command::Disconnect(self.account, None));
+        }
     }
 }
 
