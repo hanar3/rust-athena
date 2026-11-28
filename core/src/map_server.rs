@@ -113,7 +113,7 @@ fn handle(
             let _ = writer.shutdown(Shutdown::Both);
         })?;
     let connection = run_session(
-        stream,
+        &mut stream,
         started,
         &session,
         entry.character,
@@ -133,8 +133,16 @@ fn handle(
             wire::MAP_RETURN_TO_CHARACTER_SELECT.to_vec()
         }
     };
-    session.close_with_reply(reply)?;
-    Ok(())
+    let Some(output) = session.release()? else {
+        return Ok(());
+    };
+    output.try_send(reply)?;
+    // Rodecomp handles EOF before dispatching packets already in its input buffer.
+    // Keep the writer alive until the client consumes the reply and closes.
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let drained = listener::drain(stream);
+    drop(output);
+    drained
 }
 
 enum MapExit {
@@ -143,7 +151,7 @@ enum MapExit {
 }
 
 fn run_session(
-    mut stream: TcpStream,
+    stream: &mut TcpStream,
     started: Instant,
     session: &Session<'_>,
     character: u32,
@@ -168,7 +176,7 @@ fn run_session(
             }
         };
         stream.set_read_timeout(Some(timeout))?;
-        match wire::read_map_request(&mut stream)? {
+        match wire::read_map_request(stream)? {
             wire::MapRequest::Loaded => {
                 if session.loaded()? {
                     loaded = true;

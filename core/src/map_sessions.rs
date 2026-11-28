@@ -17,6 +17,8 @@ pub struct MapSessions {
     commands: SyncSender<Command>,
 }
 
+type PacketSender = SyncSender<Vec<u8>>;
+
 enum Command {
     Admit(Player, SyncSender<bool>),
     Spawn(u32, Option<Tile>, SyncSender<Tile>),
@@ -25,7 +27,7 @@ enum Command {
     Walk(u32, Tile, SyncSender<Option<Tile>>),
     Face(u32, u16, u8),
     Reply(u32, Vec<u8>),
-    Disconnect(u32, Option<Vec<u8>>),
+    Disconnect(u32, Option<SyncSender<Option<PacketSender>>>),
 }
 
 #[derive(Default)]
@@ -37,7 +39,7 @@ struct MapState {
 
 struct Player {
     appearance: wire::PlayerAppearance,
-    output: Option<SyncSender<Vec<u8>>>,
+    output: Option<PacketSender>,
     loaded: bool,
     tile: Tile,
     direction: u8,
@@ -156,7 +158,7 @@ impl MapSessions {
         appearance: wire::PlayerAppearance,
         spawn: Tile,
         direction: u8,
-        output: SyncSender<Vec<u8>>,
+        output: PacketSender,
     ) -> io::Result<Option<Session<'_>>> {
         let account = appearance.account;
         let player = Player {
@@ -238,8 +240,8 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
             Command::Disconnect(account, reply) => {
                 let player = state.players.remove(&account);
                 state.refresh_visibility(tick(now));
-                if let (Some(mut player), Some(reply)) = (player, reply) {
-                    player.send(reply);
+                if let Some(reply) = reply {
+                    let _ = reply.send(player.and_then(|player| player.output));
                 }
             }
         }
@@ -266,11 +268,11 @@ impl Session<'_> {
         self.map.send(Command::Reply(self.account, packet.into()))
     }
 
-    /// Release the account before the writer can send the final packet.
-    pub fn close_with_reply(mut self, reply: impl Into<Vec<u8>>) -> io::Result<()> {
+    /// Release the account and hand the writer queue back to the connection.
+    pub fn release(mut self) -> io::Result<Option<PacketSender>> {
         self.active = false;
         self.map
-            .send(Command::Disconnect(self.account, Some(reply.into())))
+            .request(|reply| Command::Disconnect(self.account, Some(reply)))
     }
 
     pub fn restore_position(&self, saved: Option<Tile>) -> io::Result<Tile> {
