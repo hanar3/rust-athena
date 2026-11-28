@@ -337,6 +337,7 @@ pub enum MapRequest {
     RemainingPlaytime,
     CashShopCatalog,
     Quit,
+    Restart(u8),
     Face { head: u16, body: u8 },
     Move(u16, u16),
 }
@@ -352,6 +353,11 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
         0x0447 => Ok(MapRequest::ConfirmLoad),
         0x01c0 => Ok(MapRequest::RemainingPlaytime),
         0x08c9 => Ok(MapRequest::CashShopCatalog),
+        0x00b2 => {
+            let mut kind = [0];
+            reader.read_exact(&mut kind)?;
+            Ok(MapRequest::Restart(kind[0]))
+        }
         0x018a => {
             reader.read_exact(&mut [0; 2])?;
             Ok(MapRequest::Quit)
@@ -470,6 +476,8 @@ pub fn map_time(tick: u32) -> [u8; 6] {
     reply
 }
 
+pub const MAP_RETURN_TO_CHARACTER_SELECT: [u8; 3] = [0xb3, 0, 1];
+
 pub fn map_quit_ack(allowed: bool) -> [u8; 4] {
     [0x8b, 0x01, u8::from(!allowed), 0]
 }
@@ -496,6 +504,23 @@ mod tests {
             player_facing(0x12345678, 2, 7),
             [0x9c, 0, 0x78, 0x56, 0x34, 0x12, 2, 0, 7]
         );
+    }
+
+    #[test]
+    fn restart_request_consumes_one_type_byte() {
+        for kind in [0, 1, 255] {
+            let frame = [0xb2, 0, kind, 0x1c, 0x0b];
+            let mut reader = frame.as_slice();
+            assert!(
+                matches!(read_map_request(&mut reader).unwrap(), MapRequest::Restart(value) if value == kind)
+            );
+            assert!(matches!(
+                read_map_request(&mut reader).unwrap(),
+                MapRequest::Ping
+            ));
+        }
+        assert!(read_map_request(&mut &[0xb2, 0][..]).is_err());
+        assert_eq!(MAP_RETURN_TO_CHARACTER_SELECT, [0xb3, 0, 1]);
     }
 
     #[test]

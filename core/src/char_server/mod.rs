@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::net::{SocketAddrV4, TcpStream};
 use std::time::Duration;
 
-use rust_athena_db::{Character, Database, NewCharacter};
+use rust_athena_db::{Character, CharacterCredentials, Database, NewCharacter};
 
 use crate::{listener, map_server::START_MAP, protocol::v20260219 as wire, Result};
 
@@ -55,7 +55,10 @@ fn handle(db: &Database, mut stream: TcpStream, map_endpoint: SocketAddrV4) -> R
                     || !db.issue_map_transfer(
                         account,
                         character.id,
-                        entry.login_ids[0],
+                        CharacterCredentials {
+                            login_ids: entry.login_ids,
+                            sex: entry.sex,
+                        },
                         START_MAP,
                     )?
                 {

@@ -46,9 +46,17 @@ Rodecomp sends `0361` (5) to update head and body direction. The map owner valid
 
 | Exchange | Client request | Server reply | Behavior and evidence |
 | --- | --- | --- | --- |
-| Quit from the map | `018a` (4) | `018b` (4), result 0 allows quit and result 1 denies it | Rodecomp sends the request from its Quit action and closes after a successful reply. Rust Athena accepts quit after map load, saves the last reached tile before sending success, and denies the request before load. Codec and local TCP/MariaDB checks passed. A live Rodecomp check is pending. Returning to character select is a separate exchange. |
+| Quit from the map | `018a` (4) | `018b` (4), result 0 allows quit and result 1 denies it | Rodecomp sends the request from its Quit action and closes after a successful reply. Rust Athena accepts quit after map load, saves the last reached tile before sending success, and denies the request before load. Codec and local TCP/MariaDB checks passed. A live Rodecomp check is pending. |
 
 [Issue #9](https://github.com/hanar3/rust-athena/issues/9) · [rAthena quit handling](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11435) · [Rodecomp quit request](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameMode.cpp#L1831) · [Rodecomp acknowledgement handling](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L26628)
+
+## Return to character select
+
+Rodecomp sends `CZ_RESTART` (`00b2`, three bytes) with type 1. On `ZC_RESTART_ACK` (`00b3`, three bytes) with type 1, it closes the map socket and reconnects to the advertised character endpoint using the original account ID, both login IDs, and account sex. Rust Athena saves the last reached tile, creates a 60-second, single-use character handoff, and releases the map session before the writer sends success. The server waits for the client to close. Rodecomp processes transport EOF before dispatching buffered packets, so closing immediately after the acknowledgement can cause a disconnect. A type 1 request before map load or from a legacy transfer receives `018b` with result 1. Other request types are consumed. Type 0 is the respawn path and still needs an implementation.
+
+The codec and local TCP/MariaDB checks covered switching between two characters, returning to the saved tile, replay refusal, old transfer rows, and a competing login. Live Rodecomp verification is pending. Apply the map return credentials migration, start the three roles with Prontera walkability enabled, walk to a new tile, and choose Character Select from the Esc menu. Select a second character, repeat the return, and select the first character to verify its saved position.
+
+[Issue #13](https://github.com/hanar3/rust-athena/issues/13) · [rAthena restart handling](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11832) · [Rodecomp acknowledgement](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L24491) · [Rodecomp character reconnect](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/LoginMode.cpp#L3656)
 
 ## Reconciliation workflow
 

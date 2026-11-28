@@ -17,6 +17,8 @@ pub struct MapSessions {
     commands: SyncSender<Command>,
 }
 
+type PacketSender = SyncSender<Vec<u8>>;
+
 enum Command {
     Admit(Player, SyncSender<bool>),
     Spawn(u32, Option<Tile>, SyncSender<Tile>),
@@ -25,7 +27,7 @@ enum Command {
     Walk(u32, Tile, SyncSender<Option<Tile>>),
     Face(u32, u16, u8),
     Reply(u32, Vec<u8>),
-    Disconnect(u32),
+    Disconnect(u32, Option<SyncSender<Option<PacketSender>>>),
 }
 
 #[derive(Default)]
@@ -37,7 +39,7 @@ struct MapState {
 
 struct Player {
     appearance: wire::PlayerAppearance,
-    output: Option<SyncSender<Vec<u8>>>,
+    output: Option<PacketSender>,
     loaded: bool,
     tile: Tile,
     direction: u8,
@@ -156,7 +158,7 @@ impl MapSessions {
         appearance: wire::PlayerAppearance,
         spawn: Tile,
         direction: u8,
-        output: SyncSender<Vec<u8>>,
+        output: PacketSender,
     ) -> io::Result<Option<Session<'_>>> {
         let account = appearance.account;
         let player = Player {
@@ -169,7 +171,11 @@ impl MapSessions {
             steps: VecDeque::new(),
         };
         let admitted = self.request(|reply| Command::Admit(player, reply))?;
-        Ok(admitted.then(|| Session { map: self, account }))
+        Ok(admitted.then(|| Session {
+            map: self,
+            account,
+            active: true,
+        }))
     }
 
     fn request<T>(&self, command: impl FnOnce(SyncSender<T>) -> Command) -> io::Result<T> {
@@ -231,9 +237,12 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
                     player.send(packet);
                 }
             }
-            Command::Disconnect(account) => {
-                state.players.remove(&account);
+            Command::Disconnect(account, reply) => {
+                let player = state.players.remove(&account);
                 state.refresh_visibility(tick(now));
+                if let Some(reply) = reply {
+                    let _ = reply.send(player.and_then(|player| player.output));
+                }
             }
         }
     }
@@ -251,11 +260,19 @@ fn map_stopped() -> io::Error {
 pub struct Session<'a> {
     map: &'a MapSessions,
     account: u32,
+    active: bool,
 }
 
 impl Session<'_> {
     pub fn send(&self, packet: impl Into<Vec<u8>>) -> io::Result<()> {
         self.map.send(Command::Reply(self.account, packet.into()))
+    }
+
+    /// Release the account and hand the writer queue back to the connection.
+    pub fn release(mut self) -> io::Result<Option<PacketSender>> {
+        self.active = false;
+        self.map
+            .request(|reply| Command::Disconnect(self.account, Some(reply)))
     }
 
     pub fn restore_position(&self, saved: Option<Tile>) -> io::Result<Tile> {
@@ -286,7 +303,9 @@ impl Session<'_> {
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
-        let _ = self.map.send(Command::Disconnect(self.account));
+        if self.active {
+            let _ = self.map.send(Command::Disconnect(self.account, None));
+        }
     }
 }
 

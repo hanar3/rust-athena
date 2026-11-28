@@ -51,16 +51,18 @@ fn handle(
     sessions: &MapSessions,
 ) -> Result<()> {
     let entry = wire::read_map_entry(&mut stream)?;
-    if !db.redeem_map_transfer(
+    let Some(transfer) = db.redeem_map_transfer(
         entry.account,
         entry.character,
         entry.auth_code,
         entry.sex,
         START_MAP,
-    )? {
+    )?
+    else {
         stream.write_all(&wire::map_entry_refused())?;
         return listener::drain(stream);
-    }
+    };
+    let return_credentials = transfer.return_credentials(entry.auth_code);
 
     let Some(character) = db.character(entry.account, entry.character)? else {
         stream.write_all(&wire::map_entry_refused())?;
@@ -110,24 +112,52 @@ fn handle(
             }
             let _ = writer.shutdown(Shutdown::Both);
         })?;
-    let connection = run_session(stream, started, &session, entry.character, spawn);
+    let connection = run_session(
+        &mut stream,
+        started,
+        &session,
+        entry.character,
+        spawn,
+        return_credentials.is_some(),
+    );
     // This runs on the connection thread, including when the peer resets the socket.
     if let Some(tile) = session.finish()? {
         db.save_character_position(entry.account, entry.character, START_MAP, tile)?;
     }
-    // The read loop returns normally only for an accepted quit. Enqueue its
-    // reply before dropping the lease so the socket writer flushes it in order.
-    connection?;
-    session.send(wire::map_quit_ack(true)).map_err(Into::into)
+    let exit = connection?;
+    let reply = match exit {
+        MapExit::Quit => wire::map_quit_ack(true).to_vec(),
+        MapExit::CharacterSelect => {
+            let credentials = return_credentials.ok_or("missing character return credentials")?;
+            db.issue_return_handoff(entry.account, credentials)?;
+            wire::MAP_RETURN_TO_CHARACTER_SELECT.to_vec()
+        }
+    };
+    let Some(output) = session.release()? else {
+        return Ok(());
+    };
+    output.try_send(reply)?;
+    // Rodecomp handles EOF before dispatching packets already in its input buffer.
+    // Keep the writer alive until the client consumes the reply and closes.
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let drained = listener::drain(stream);
+    drop(output);
+    drained
+}
+
+enum MapExit {
+    Quit,
+    CharacterSelect,
 }
 
 fn run_session(
-    mut stream: TcpStream,
+    stream: &mut TcpStream,
     started: Instant,
     session: &Session<'_>,
     character: u32,
     spawn: Tile,
-) -> Result<()> {
+    can_return: bool,
+) -> Result<MapExit> {
     let load_deadline = Instant::now() + LOAD_TIMEOUT;
     let mut loaded = false;
     loop {
@@ -146,7 +176,7 @@ fn run_session(
             }
         };
         stream.set_read_timeout(Some(timeout))?;
-        match wire::read_map_request(&mut stream)? {
+        match wire::read_map_request(stream)? {
             wire::MapRequest::Loaded => {
                 if session.loaded()? {
                     loaded = true;
@@ -162,7 +192,12 @@ fn run_session(
             | wire::MapRequest::CashShopCatalog => {}
             wire::MapRequest::SyncTime => session.send(wire::map_time(server_tick(started)))?,
             wire::MapRequest::Ping => session.send(wire::MAP_PONG)?,
-            wire::MapRequest::Quit if loaded => return Ok(()),
+            wire::MapRequest::Quit if loaded => return Ok(MapExit::Quit),
+            wire::MapRequest::Restart(1) if loaded && can_return => {
+                return Ok(MapExit::CharacterSelect);
+            }
+            wire::MapRequest::Restart(1) => session.send(wire::map_quit_ack(false))?,
+            wire::MapRequest::Restart(_) => {}
             wire::MapRequest::Quit => session.send(wire::map_quit_ack(false))?,
             wire::MapRequest::Face { head, body } => session.face(head, body)?,
             wire::MapRequest::Move(x, y) => {
