@@ -36,6 +36,12 @@ Directions are relative to the server. Multiple opcodes on one line belong to th
 | Map startup requests | `01c0` (2), `08c9` (2) | — | Consumed. The pinned rAthena table specifies two bytes for both. Rust Athena currently has an empty catalog. |
 | Map movement and actor visibility | `035f` (5) | `0087` (12), `09ff` and `09fd` (variable), `0080` (7) | Client-confirmed self movement. Two-client TCP tested appearance and visibility. Map state is in memory. Position writes on disconnect. |
 
+## Packet codec
+
+The versioned codec uses Deku for multi-field packet bodies and fixed-size replies, including character records and both actor entry variants. Struct fields follow wire order and declare endianness, padding, and sub-byte widths. The read functions still dispatch by opcode and read exactly one body before decoding. The roster functions concatenate each framed reply and its records in arrival order. Opcode-only frames and single scalar reads use standard byte operations.
+
+The migration compared complete encoded packets directly with the previous codec, including rosters of zero through fifteen characters and both actor entry variants. The check also compared login and handoff decoders, truncated input, and bytes left for the next frame. A disposable MariaDB run verified login, map entry, walking, and the return to character select over TCP.
+
 ## Movement packet layout
 
 `NotifyPlayerMove` encodes the `0087` opcode and the walk-start tick as little-endian fields, followed by a six-byte `WalkRoute`. The route encodes source X/Y and destination X/Y as four 10-bit values, most-significant bit first, followed by two four-bit sub-tile offsets set to 8. Moving actor entry (`09fd`) shares the route encoder. Fixtures check both packet paths, including coordinates above 511.
