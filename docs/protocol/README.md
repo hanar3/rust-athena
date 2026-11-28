@@ -56,6 +56,14 @@ Rodecomp sends `0361` (5) to update head and body direction. The map owner valid
 
 [Issue #11](https://github.com/hanar3/rust-athena/issues/11) · [rAthena direction handler](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11581) · [Rodecomp direction decoder](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L23842)
 
+## Player name lookup
+
+Rodecomp sends `CZ_REQNAME2` (`0368`, six bytes) when it needs a name card for an actor, such as when hovering over a nearby player. The request carries the same four-byte actor ID used in map entry packets. The active rAthena table for clients newer than 2018-03-07 registers this opcode for actor-name lookup, overriding historical entries. The player reply is `ZC_ACK_REQNAMEALL2` (`0a30`, 106 bytes). It contains the actor ID, four 24-byte fields for character, party, guild, and position names, and a four-byte title ID. Rust Athena fills the character name and leaves the other metadata zero.
+
+The map owner answers a loaded requester for itself or a visible loaded player. Requests for unknown, unloaded, or out-of-range actors receive no reply. Codec and two-client TCP checks passed, including lookups after range exit and disconnect. Live Rodecomp verification is pending. With two characters in view, hover over each peer and confirm its character name appears.
+
+[Issue #17](https://github.com/hanar3/rust-athena/issues/17) · [rAthena active packet table](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif_shuffle.hpp#L4742) · [rAthena player reply](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L9928) · [Rodecomp name-card handler](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModeHandlers.cpp#L1861)
+
 ## Map quit
 
 | Exchange | Client request | Server reply | Behavior and evidence |

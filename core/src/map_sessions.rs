@@ -26,6 +26,7 @@ enum Command {
     Finish(u32, SyncSender<Option<Tile>>),
     Walk(u32, Tile, SyncSender<Option<Tile>>),
     Face(u32, u16, u8),
+    LookupActorName(u32, u32),
     Reply(u32, Vec<u8>),
     Disconnect(u32, Option<SyncSender<Option<PacketSender>>>),
 }
@@ -232,6 +233,10 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
                 state.advance(now, tick(now));
                 state.face(account, head, body);
             }
+            Command::LookupActorName(account, actor) => {
+                state.advance(now, tick(now));
+                state.lookup_actor_name(account, actor);
+            }
             Command::Reply(account, packet) => {
                 if let Some(player) = state.players.get_mut(&account) {
                     player.send(packet);
@@ -293,6 +298,10 @@ impl Session<'_> {
 
     pub fn face(&self, head: u16, body: u8) -> io::Result<()> {
         self.map.send(Command::Face(self.account, head, body))
+    }
+
+    pub fn lookup_actor_name(&self, actor: u32) -> io::Result<()> {
+        self.map.send(Command::LookupActorName(self.account, actor))
     }
 
     pub fn begin_walk(&self, target: Tile) -> io::Result<Option<Tile>> {
@@ -389,6 +398,20 @@ impl MapState {
         self.send_to_observers(account, wire::player_facing(account, head, body).to_vec());
     }
 
+    fn lookup_actor_name(&mut self, account: u32, actor: u32) {
+        let pair = (account.min(actor), account.max(actor));
+        if account != actor && !self.visible.contains(&pair) {
+            return;
+        }
+        let Some(target) = self.players.get(&actor).filter(|player| player.loaded) else {
+            return;
+        };
+        let packet = wire::actor_name_card(&target.appearance);
+        if let Some(requester) = self.players.get_mut(&account) {
+            requester.send(packet.to_vec());
+        }
+    }
+
     fn send_to_observers(&mut self, account: u32, packet: Vec<u8>) {
         let MapState { visible, players } = self;
         for &(left, right) in visible.iter() {
@@ -436,6 +459,44 @@ mod tests {
         assert_eq!(&packet[..2], &opcode.to_le_bytes());
         assert_eq!(&packet[offset..offset + 4], &account.to_le_bytes());
         packet
+    }
+
+    #[test]
+    fn name_cards_are_sent_only_to_eligible_requesters() {
+        let now = Instant::now();
+        let mut map = MapState::default();
+        let left = open(&mut map, 7, (156, 191));
+        let right = open(&mut map, 8, (170, 191));
+        map.lookup_actor_name(7, 7);
+        assert!(left.try_recv().is_err());
+
+        assert!(map.loaded(7, now, 0));
+        assert_eq!(left.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        map.lookup_actor_name(7, 8);
+        assert!(left.try_recv().is_err());
+
+        assert!(map.loaded(8, now, 0));
+        assert_eq!(right.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        packet(&left, 0x09ff, 8, 5);
+        packet(&right, 0x09ff, 7, 5);
+
+        map.lookup_actor_name(7, 8);
+        let card = packet(&left, 0x0a30, 8, 2);
+        assert_eq!(card.len(), 106);
+        assert_eq!(&card[6..13], b"Player8");
+        assert!(card[13..].iter().all(|&byte| byte == 0));
+        assert!(right.try_recv().is_err());
+
+        map.lookup_actor_name(7, 7);
+        let card = packet(&left, 0x0a30, 7, 2);
+        assert_eq!(&card[6..13], b"Player7");
+
+        map.players.get_mut(&8).unwrap().tile = (171, 191);
+        map.refresh_visibility(0);
+        packet(&left, 0x0080, 8, 2);
+        map.lookup_actor_name(7, 8);
+        map.lookup_actor_name(7, 108);
+        assert!(left.try_recv().is_err());
     }
 
     #[test]
