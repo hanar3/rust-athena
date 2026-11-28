@@ -1,7 +1,10 @@
 //! Client wire format used by the 2026-02-19 login and character listeners.
 use std::convert::TryInto;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::net::SocketAddrV4;
+
+use deku::writer::Writer;
+use deku::{DekuWrite, DekuWriter};
 
 pub type CharacterRecord = [u8; 175];
 
@@ -384,63 +387,69 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
 }
 
 pub fn player_move(tick: u32, source: (u16, u16), destination: (u16, u16)) -> [u8; 12] {
-    NotifyPlayerMove {
+    let packet = NotifyPlayerMove {
+        opcode: NotifyPlayerMove::OPCODE,
         walk_start_tick: tick,
-        route: WalkRoute {
-            source,
-            destination,
-        },
-    }
-    .encode()
+        route: WalkRoute::new(source, destination),
+    };
+    let mut bytes = [0; 12];
+    write_fixed(&packet, &mut bytes);
+    bytes
 }
 
+#[derive(DekuWrite)]
 struct NotifyPlayerMove {
+    #[deku(endian = "little")]
+    opcode: u16,
+    #[deku(endian = "little")]
     walk_start_tick: u32,
     route: WalkRoute,
 }
 
 impl NotifyPlayerMove {
     const OPCODE: u16 = 0x0087;
-
-    fn encode(self) -> [u8; 12] {
-        let opcode = Self::OPCODE.to_le_bytes();
-        let walk_start_tick = self.walk_start_tick.to_le_bytes();
-        let route = self.route.encode();
-        let mut packet = [0; 12];
-        let (header, fields) = packet.split_at_mut(opcode.len());
-        let (tick_field, route_field) = fields.split_at_mut(walk_start_tick.len());
-        header.copy_from_slice(&opcode);
-        tick_field.copy_from_slice(&walk_start_tick);
-        route_field.copy_from_slice(&route);
-        packet
-    }
 }
 
+#[derive(DekuWrite)]
+#[deku(endian = "big", bit_order = "msb")]
 struct WalkRoute {
-    source: (u16, u16),
-    destination: (u16, u16),
+    #[deku(bits = "10")]
+    source_x: u16,
+    #[deku(bits = "10")]
+    source_y: u16,
+    #[deku(bits = "10")]
+    destination_x: u16,
+    #[deku(bits = "10")]
+    destination_y: u16,
+    #[deku(bits = "4")]
+    sub_tile_x: u8,
+    #[deku(bits = "4")]
+    sub_tile_y: u8,
 }
 
 impl WalkRoute {
-    fn encode(self) -> [u8; 6] {
-        const TILE_COORDINATE_BITS: u32 = 10;
-        const SUB_TILE_BITS: u32 = 4;
-        const SUB_TILE_CENTER: u64 = 8;
+    fn new((source_x, source_y): (u16, u16), (destination_x, destination_y): (u16, u16)) -> Self {
+        const SUB_TILE_CENTER: u8 = 8;
 
-        let (source_x, source_y) = self.source;
-        let (destination_x, destination_y) = self.destination;
-        // The route packs coordinates and sub-tile offsets most-significant bit first.
-        let coordinates = [source_x, source_y, destination_x, destination_y]
-            .iter()
-            .copied()
-            .fold(0u64, |route, coordinate| {
-                (route << TILE_COORDINATE_BITS) | u64::from(coordinate)
-            });
-        let sub_tile_offsets = (SUB_TILE_CENTER << SUB_TILE_BITS) | SUB_TILE_CENTER;
-        let route = (coordinates << (2 * SUB_TILE_BITS)) | sub_tile_offsets;
-        let [_, _, a, b, c, d, e, f] = route.to_be_bytes();
-        [a, b, c, d, e, f]
+        Self {
+            source_x,
+            source_y,
+            destination_x,
+            destination_y,
+            sub_tile_x: SUB_TILE_CENTER,
+            sub_tile_y: SUB_TILE_CENTER,
+        }
     }
+}
+
+fn write_fixed(packet: &impl DekuWriter<()>, bytes: &mut [u8]) {
+    let expected_len = bytes.len() as u64;
+    let mut cursor = Cursor::new(bytes);
+    // Movement uses map-validated coordinates and fixed-size packet fields.
+    packet
+        .to_writer(&mut Writer::new(&mut cursor), ())
+        .expect("valid fixed-size movement packet");
+    debug_assert_eq!(cursor.position(), expected_len);
 }
 
 pub struct PlayerAppearance {
@@ -485,11 +494,8 @@ pub fn visible_player(
     reply[sex_offset] = actor.sex;
     let level_offset = if let Some((tick, destination)) = walk {
         reply[0x25..0x29].copy_from_slice(&tick.to_le_bytes());
-        let route = WalkRoute {
-            source: (x, y),
-            destination,
-        };
-        reply[0x43..0x49].copy_from_slice(&route.encode());
+        let route = WalkRoute::new((x, y), destination);
+        write_fixed(&route, &mut reply[0x43..0x49]);
         reply[0x49..0x4b].fill(5);
         0x4b
     } else {

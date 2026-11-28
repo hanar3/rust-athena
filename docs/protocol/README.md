@@ -40,7 +40,7 @@ Directions are relative to the server. Multiple opcodes on one line belong to th
 
 `NotifyPlayerMove` encodes the `0087` opcode and the walk-start tick as little-endian fields, followed by a six-byte `WalkRoute`. The route encodes source X/Y and destination X/Y as four 10-bit values, most-significant bit first, followed by two four-bit sub-tile offsets set to 8. Moving actor entry (`09fd`) shares the route encoder. Fixtures check both packet paths, including coordinates above 511.
 
-The pilot also encoded the high-coordinate fixture with Deku 0.20.3. The derive expressed the same layout with little-endian header fields and a big-endian route with explicit bit widths. It wrote to a fixed buffer through a cursor and returned a serialization result. The explicit Rust encoder keeps this small layout infallible for the map callers and adds no dependency. Revisit the choice when an exchange needs symmetric parsing and writing or more substantial bit-field layouts.
+Deku derives the wire encoding for both types. The field attributes declare byte order and bit widths, and a shared writer sends the result into the existing fixed-size buffers. The map supplies coordinates within 0–1023 and the fixtures exercise the same write paths used during play.
 
 [Issue #15](https://github.com/hanar3/rust-athena/issues/15) · [rAthena movement encoder](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L2052) · [Rodecomp movement decoder](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModePackets.cpp#L23653) · [Deku attributes](https://docs.rs/deku/0.20.3/deku/attributes/index.html)
 
