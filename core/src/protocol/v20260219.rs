@@ -383,23 +383,64 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
     }
 }
 
-pub fn player_move(tick: u32, (x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) -> [u8; 12] {
-    let mut reply = [0; 12];
-    reply[..2].copy_from_slice(&0x0087u16.to_le_bytes());
-    reply[2..6].copy_from_slice(&tick.to_le_bytes());
-    reply[6..].copy_from_slice(&packed_walk((x, y), (dest_x, dest_y)));
-    reply
+pub fn player_move(tick: u32, source: (u16, u16), destination: (u16, u16)) -> [u8; 12] {
+    NotifyPlayerMove {
+        walk_start_tick: tick,
+        route: WalkRoute {
+            source,
+            destination,
+        },
+    }
+    .encode()
 }
 
-fn packed_walk((x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) -> [u8; 6] {
-    [
-        (x >> 2) as u8,
-        (((x & 3) << 6) | (y >> 4)) as u8,
-        (((y & 15) << 4) | (dest_x >> 6)) as u8,
-        (((dest_x & 63) << 2) | (dest_y >> 8)) as u8,
-        dest_y as u8,
-        0x88,
-    ]
+struct NotifyPlayerMove {
+    walk_start_tick: u32,
+    route: WalkRoute,
+}
+
+impl NotifyPlayerMove {
+    const OPCODE: u16 = 0x0087;
+
+    fn encode(self) -> [u8; 12] {
+        let opcode = Self::OPCODE.to_le_bytes();
+        let walk_start_tick = self.walk_start_tick.to_le_bytes();
+        let route = self.route.encode();
+        let mut packet = [0; 12];
+        let (header, fields) = packet.split_at_mut(opcode.len());
+        let (tick_field, route_field) = fields.split_at_mut(walk_start_tick.len());
+        header.copy_from_slice(&opcode);
+        tick_field.copy_from_slice(&walk_start_tick);
+        route_field.copy_from_slice(&route);
+        packet
+    }
+}
+
+struct WalkRoute {
+    source: (u16, u16),
+    destination: (u16, u16),
+}
+
+impl WalkRoute {
+    fn encode(self) -> [u8; 6] {
+        const TILE_COORDINATE_BITS: u32 = 10;
+        const SUB_TILE_BITS: u32 = 4;
+        const SUB_TILE_CENTER: u64 = 8;
+
+        let (source_x, source_y) = self.source;
+        let (destination_x, destination_y) = self.destination;
+        // The route packs coordinates and sub-tile offsets most-significant bit first.
+        let coordinates = [source_x, source_y, destination_x, destination_y]
+            .iter()
+            .copied()
+            .fold(0u64, |route, coordinate| {
+                (route << TILE_COORDINATE_BITS) | u64::from(coordinate)
+            });
+        let sub_tile_offsets = (SUB_TILE_CENTER << SUB_TILE_BITS) | SUB_TILE_CENTER;
+        let route = (coordinates << (2 * SUB_TILE_BITS)) | sub_tile_offsets;
+        let [_, _, a, b, c, d, e, f] = route.to_be_bytes();
+        [a, b, c, d, e, f]
+    }
 }
 
 pub struct PlayerAppearance {
@@ -444,7 +485,11 @@ pub fn visible_player(
     reply[sex_offset] = actor.sex;
     let level_offset = if let Some((tick, destination)) = walk {
         reply[0x25..0x29].copy_from_slice(&tick.to_le_bytes());
-        reply[0x43..0x49].copy_from_slice(&packed_walk((x, y), destination));
+        let route = WalkRoute {
+            source: (x, y),
+            destination,
+        };
+        reply[0x43..0x49].copy_from_slice(&route.encode());
         reply[0x49..0x4b].fill(5);
         0x4b
     } else {
@@ -572,6 +617,31 @@ mod tests {
             player_move(0x12345678, (156, 191), (157, 191)),
             [0x87, 0, 0x78, 0x56, 0x34, 0x12, 0x27, 0x0b, 0xf2, 0x74, 0xbf, 0x88]
         );
+    }
+
+    #[test]
+    fn self_move_and_moving_actor_encode_high_coordinate_bits() {
+        let tick = 0x12345678;
+        let source = (1023, 512);
+        let destination = (768, 1023);
+        assert_eq!(
+            player_move(tick, source, destination),
+            [0x87, 0, 0x78, 0x56, 0x34, 0x12, 0xff, 0xe0, 0x0c, 0x03, 0xff, 0x88]
+        );
+
+        let actor = PlayerAppearance {
+            account: 1,
+            character: 2,
+            name: "Walker".into(),
+            job: 0,
+            hair: 0,
+            hair_color: 0,
+            sex: 0,
+        };
+        let packet = visible_player(&actor, source, 0, 0, Some((tick, destination)));
+        assert_eq!(&packet[..4], &[0xfd, 0x09, 0x72, 0]);
+        assert_eq!(&packet[0x25..0x29], &[0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(&packet[0x43..0x49], &[0xff, 0xe0, 0x0c, 0x03, 0xff, 0x88]);
     }
 
     #[test]
