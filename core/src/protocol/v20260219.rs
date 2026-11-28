@@ -520,6 +520,12 @@ struct ChangeDirection {
     body: u8,
 }
 
+#[derive(DekuRead)]
+#[deku(endian = "little")]
+struct ActorNameRequest {
+    actor: u32,
+}
+
 pub enum MapRequest {
     Loaded,
     SyncTime,
@@ -530,6 +536,7 @@ pub enum MapRequest {
     Quit,
     Restart(u8),
     Face { head: u16, body: u8 },
+    ActorName(u32),
     Move(u16, u16),
 }
 
@@ -556,6 +563,10 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
         0x0361 => {
             let ChangeDirection { head, body } = decode_body::<_, 3>(reader)?;
             Ok(MapRequest::Face { head, body })
+        }
+        0x0368 => {
+            let request: ActorNameRequest = decode_body::<_, 4>(reader)?;
+            Ok(MapRequest::ActorName(request.actor))
         }
         0x035f => {
             let position: MapPosition = decode_body::<_, 3>(reader)?;
@@ -639,6 +650,37 @@ pub struct PlayerAppearance {
     pub hair: i16,
     pub hair_color: i16,
     pub sex: u8,
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct ActorNameCard {
+    opcode: u16,
+    actor: u32,
+    name: [u8; 24],
+    party_name: [u8; 24],
+    guild_name: [u8; 24],
+    position_name: [u8; 24],
+    title_id: u32,
+}
+
+pub fn actor_name_card(actor: &PlayerAppearance) -> [u8; 106] {
+    encode_fixed(&ActorNameCard {
+        opcode: 0x0a30,
+        actor: actor.account,
+        name: actor_name_field(&actor.name),
+        party_name: [0; 24],
+        guild_name: [0; 24],
+        position_name: [0; 24],
+        title_id: 0,
+    })
+}
+
+fn actor_name_field(name: &str) -> [u8; 24] {
+    let mut field = [0; 24];
+    let len = name.len().min(field.len() - 1);
+    field[..len].copy_from_slice(&name.as_bytes()[..len]);
+    field
 }
 
 #[derive(DekuWrite)]
@@ -739,9 +781,7 @@ pub fn visible_player(
         head_direction,
         sex: actor.sex,
     };
-    let mut name = [0; 24];
-    let name_len = actor.name.len().min(23);
-    name[..name_len].copy_from_slice(&actor.name.as_bytes()[..name_len]);
+    let name = actor_name_field(&actor.name);
 
     let tail = ActorEntryTail {
         level: 1,
@@ -828,6 +868,23 @@ pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_name_lookup_decodes_one_frame() {
+        let mut frames: &[u8] = &[0x68, 0x03, 0x78, 0x56, 0x34, 0x12, 0x1c, 0x0b];
+        assert!(matches!(
+            read_map_request(&mut frames).unwrap(),
+            MapRequest::ActorName(0x12345678)
+        ));
+        assert!(matches!(
+            read_map_request(&mut frames).unwrap(),
+            MapRequest::Ping
+        ));
+        let error = read_map_request(&mut &[0x68, 0x03, 0x78][..])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
 
     #[test]
     fn login_preamble_preserves_frame_alignment_and_truncation() {
