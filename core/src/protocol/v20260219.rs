@@ -1,7 +1,9 @@
-//! Client wire format used by the 2026-02-19 login and character listeners.
-use std::convert::TryInto;
-use std::io::{self, Read};
+//! Client wire format used by the 2026-02-19 login, character, and map listeners.
+use std::io::{self, Cursor, Read};
 use std::net::SocketAddrV4;
+
+use deku::{reader::Reader, writer::Writer};
+use deku::{DekuRead, DekuReader, DekuWrite, DekuWriter};
 
 pub type CharacterRecord = [u8; 175];
 
@@ -26,29 +28,61 @@ pub struct CharacterSummary<'a> {
 
 impl CharacterSummary<'_> {
     pub fn encode(&self) -> io::Result<CharacterRecord> {
-        let mut record = [0; 175];
-        record[..4].copy_from_slice(&self.id.to_le_bytes());
-        record[0x18..0x1c].copy_from_slice(&self.job_level.to_le_bytes());
-        record[0x32..0x3a].copy_from_slice(&self.hp.to_le_bytes());
-        record[0x3a..0x42].copy_from_slice(&self.max_hp.to_le_bytes());
-        record[0x42..0x4a].copy_from_slice(&self.sp.to_le_bytes());
-        record[0x4a..0x52].copy_from_slice(&self.max_sp.to_le_bytes());
-        record[0x52..0x54].copy_from_slice(&self.walk_speed.to_le_bytes());
-        record[0x5c..0x5e].copy_from_slice(&self.base_level.to_le_bytes());
-        write_field(&mut record[0x6c..0x84], self.name, "character name")?;
-        record[0x54..0x56].copy_from_slice(&self.job.to_le_bytes());
-        record[0x56..0x58].copy_from_slice(&self.hair.to_le_bytes());
-        record[0x68..0x6a].copy_from_slice(&self.hair_color.to_le_bytes());
-        record[0x8a] = self.slot;
-        record[0x8c] = 1; // Matches the captured character-list record.
-        write_field(&mut record[0x8e..0x9e], self.map, "map name")?;
-        record[0xae] = self.sex;
-        Ok(record)
+        Ok(encode_fixed(&RosterCharacter {
+            id: self.id,
+            job_level: self.job_level,
+            hp: self.hp,
+            max_hp: self.max_hp,
+            sp: self.sp,
+            max_sp: self.max_sp,
+            walk_speed: self.walk_speed,
+            job: self.job,
+            hair: self.hair,
+            base_level: self.base_level,
+            hair_color: self.hair_color,
+            name: padded_field(self.name, "character name")?,
+            slot: self.slot,
+            name_changed: 1,
+            map: padded_field(self.map, "map name")?,
+            sex: self.sex,
+        }))
     }
 }
 
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct RosterCharacter {
+    id: u32,
+    #[deku(pad_bytes_before = "20")]
+    job_level: i32,
+    #[deku(pad_bytes_before = "22")]
+    hp: i64,
+    max_hp: i64,
+    sp: i64,
+    max_sp: i64,
+    walk_speed: i16,
+    job: i16,
+    hair: i16,
+    #[deku(pad_bytes_before = "4")]
+    base_level: i16,
+    #[deku(pad_bytes_before = "10", pad_bytes_after = "2")]
+    hair_color: i16,
+    name: [u8; 24],
+    #[deku(pad_bytes_before = "6")]
+    slot: u8,
+    #[deku(pad_bytes_before = "1")]
+    name_changed: i16,
+    #[deku(pad_bytes_after = "16")]
+    map: [u8; 16],
+    sex: u8,
+}
+
+#[derive(DekuRead)]
+
 pub struct LoginRequest {
+    #[deku(pad_bytes_before = "4")]
     username: [u8; 24],
+    #[deku(pad_bytes_after = "1")]
     password: [u8; 24],
 }
 
@@ -62,9 +96,12 @@ impl LoginRequest {
     }
 }
 
+#[derive(DekuRead)]
+#[deku(endian = "little")]
 pub struct CharacterEntry {
     pub account: u32,
     pub login_ids: [u32; 2],
+    #[deku(pad_bytes_before = "2")]
     pub sex: u8,
 }
 
@@ -75,6 +112,8 @@ pub enum CharacterRequest {
     Select(u8),
 }
 
+#[derive(DekuRead)]
+#[deku(endian = "little")]
 pub struct CreateCharacter {
     name: [u8; 24],
     pub slot: u8,
@@ -99,12 +138,7 @@ pub fn read_login(reader: &mut impl Read) -> io::Result<LoginRequest> {
     if id != 0x0064 {
         return Err(unsupported("login", id));
     }
-    let mut body = [0; 53];
-    reader.read_exact(&mut body)?;
-    Ok(LoginRequest {
-        username: body[4..28].try_into().unwrap(),
-        password: body[28..52].try_into().unwrap(),
-    })
+    decode_body::<_, 53>(reader)
 }
 
 pub fn read_character_entry(reader: &mut impl Read) -> io::Result<CharacterEntry> {
@@ -112,16 +146,7 @@ pub fn read_character_entry(reader: &mut impl Read) -> io::Result<CharacterEntry
     if id != 0x0065 {
         return Err(unsupported("character entry", id));
     }
-    let mut body = [0; 15];
-    reader.read_exact(&mut body)?;
-    Ok(CharacterEntry {
-        account: u32::from_le_bytes(body[0..4].try_into().unwrap()),
-        login_ids: [
-            u32::from_le_bytes(body[4..8].try_into().unwrap()),
-            u32::from_le_bytes(body[8..12].try_into().unwrap()),
-        ],
-        sex: body[14],
-    })
+    decode_body::<_, 15>(reader)
 }
 
 pub fn read_character_request(reader: &mut impl Read) -> io::Result<CharacterRequest> {
@@ -132,18 +157,7 @@ pub fn read_character_request(reader: &mut impl Read) -> io::Result<CharacterReq
             reader.read_exact(&mut account)?;
             Ok(CharacterRequest::Keepalive(u32::from_le_bytes(account)))
         }
-        0x0a39 => {
-            let mut body = [0; 34];
-            reader.read_exact(&mut body)?;
-            Ok(CharacterRequest::Create(CreateCharacter {
-                name: body[..24].try_into().unwrap(),
-                slot: body[24],
-                hair_color: i16::from_le_bytes(body[25..27].try_into().unwrap()),
-                hair: i16::from_le_bytes(body[27..29].try_into().unwrap()),
-                job: i32::from_le_bytes(body[29..33].try_into().unwrap()),
-                sex: body[33],
-            }))
-        }
+        0x0a39 => decode_body::<_, 34>(reader).map(CharacterRequest::Create),
         0x0066 => {
             let mut slot = [0];
             reader.read_exact(&mut slot)?;
@@ -153,17 +167,35 @@ pub fn read_character_request(reader: &mut impl Read) -> io::Result<CharacterReq
     }
 }
 
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct LoginRefused {
+    opcode: u16,
+    #[deku(pad_bytes_after = "20")]
+    result: u32,
+}
+
 pub fn login_refused() -> [u8; 26] {
-    let mut reply = [0; 26];
-    reply[..6].copy_from_slice(&[0x3e, 0x08, 1, 0, 0, 0]);
-    reply
+    encode_fixed(&LoginRefused {
+        opcode: 0x083e,
+        result: 1,
+    })
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct CharacterEntryRefused {
+    account: u32,
+    opcode: u16,
+    reason: u8,
 }
 
 pub fn character_entry_refused(account: u32) -> [u8; 7] {
-    let mut reply = [0; 7];
-    reply[..4].copy_from_slice(&account.to_le_bytes());
-    reply[4..].copy_from_slice(&[0x6c, 0, 1]);
-    reply
+    encode_fixed(&CharacterEntryRefused {
+        account,
+        opcode: 0x006c,
+        reason: 1,
+    })
 }
 
 fn read_id(reader: &mut impl Read) -> io::Result<u16> {
@@ -180,12 +212,24 @@ fn fixed_field(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-fn write_field(field: &mut [u8], value: &[u8], name: &str) -> io::Result<()> {
+fn padded_field<const N: usize>(value: &[u8], name: &str) -> io::Result<[u8; N]> {
+    let mut field = [0; N];
     let target = field
         .get_mut(..value.len())
         .ok_or_else(|| invalid_data(format!("{} exceeds wire field width", name)))?;
     target.copy_from_slice(value);
-    Ok(())
+    Ok(field)
+}
+
+fn decode_body<T, const N: usize>(reader: &mut impl Read) -> io::Result<T>
+where
+    T: for<'a> DekuReader<'a, ()>,
+{
+    // Keep the socket read bounded to the current frame. Deku can seek within the body.
+    let mut bytes = [0; N];
+    reader.read_exact(&mut bytes)?;
+    T::from_reader_with_ctx(&mut Reader::new(Cursor::new(bytes)), ())
+        .map_err(|error| invalid_data(error.to_string()))
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -196,11 +240,38 @@ fn unsupported(stage: &str, id: u16) -> io::Error {
     invalid_data(format!("unsupported {} packet {:#06x}", stage, id))
 }
 
-fn variable_header(id: u16, len: usize) -> [u8; 4] {
-    // The character server caps a roster at fifteen fixed-size records.
-    let [id_low, id_high] = id.to_le_bytes();
-    let [len_low, len_high] = (len as u16).to_le_bytes();
-    [id_low, id_high, len_low, len_high]
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct VariableHeader {
+    opcode: u16,
+    length: u16,
+}
+
+impl VariableHeader {
+    fn new(opcode: u16, length: usize) -> Self {
+        Self {
+            opcode,
+            length: length as u16,
+        }
+    }
+}
+
+#[derive(DekuWrite)]
+struct LoginAccepted {
+    header: VariableHeader,
+    #[deku(endian = "little")]
+    login_id1: u32,
+    #[deku(endian = "little")]
+    account: u32,
+    #[deku(endian = "little", pad_bytes_after = "30")]
+    login_id2: u32,
+    #[deku(pad_bytes_after = "17")]
+    sex: u8,
+    address: [u8; 4],
+    #[deku(endian = "little")]
+    port: u16,
+    #[deku(pad_bytes_after = "134")]
+    name: [u8; 20],
 }
 
 pub fn login_reply(
@@ -210,70 +281,158 @@ pub fn login_reply(
     endpoint: SocketAddrV4,
     name: &[u8],
 ) -> io::Result<[u8; 224]> {
-    let mut reply = [0; 224];
-    let header = variable_header(0x0ac4, reply.len());
-    reply[..4].copy_from_slice(&header);
-    reply[4..8].copy_from_slice(&login_ids[0].to_le_bytes());
-    reply[8..12].copy_from_slice(&account.to_le_bytes());
-    reply[12..16].copy_from_slice(&login_ids[1].to_le_bytes());
-    reply[46] = sex;
-    reply[64..68].copy_from_slice(&endpoint.ip().octets());
-    reply[68..70].copy_from_slice(&endpoint.port().to_le_bytes());
-    write_field(&mut reply[70..90], name, "character server name")?;
-    Ok(reply)
+    Ok(encode_fixed(&LoginAccepted {
+        header: VariableHeader::new(0x0ac4, 224),
+        login_id1: login_ids[0],
+        account,
+        login_id2: login_ids[1],
+        sex,
+        address: endpoint.ip().octets(),
+        port: endpoint.port(),
+        name: padded_field(name, "character server name")?,
+    }))
+}
+
+#[derive(DekuWrite)]
+struct CharacterSlots {
+    header: VariableHeader,
+    normal: u8,
+    #[deku(pad_bytes_before = "2")]
+    valid: u8,
+    #[deku(pad_bytes_after = "20")]
+    total: u8,
+}
+
+#[derive(DekuWrite)]
+struct CharacterListHeader {
+    header: VariableHeader,
+    max_slots: u8,
+    available_slots: u8,
+    #[deku(pad_bytes_after = "20")]
+    premium_slots: u8,
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct RosterPageCount {
+    opcode: u16,
+    pages: u32,
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct PinState {
+    opcode: u16,
+    seed: u32,
+    account: u32,
+    state: u16,
 }
 
 pub fn character_entry(account: u32, slot_count: u8, roster: &[CharacterRecord]) -> Vec<u8> {
-    let mut slots = [0; 29];
-    slots[..4].copy_from_slice(&[0x2d, 0x08, 29, 0]);
-    slots[4] = slot_count;
-    slots[7] = slot_count;
-    slots[8] = slot_count;
-    let mut list = [0; 27];
-    let list_header = variable_header(0x006b, list.len() + std::mem::size_of_val(roster));
-    list[..4].copy_from_slice(&list_header);
-    list[4..7].fill(slot_count);
+    let slots: [u8; 29] = encode_fixed(&CharacterSlots {
+        header: VariableHeader::new(0x082d, 29),
+        normal: slot_count,
+        valid: slot_count,
+        total: slot_count,
+    });
+    let list: [u8; 27] = encode_fixed(&CharacterListHeader {
+        header: VariableHeader::new(0x006b, 27 + std::mem::size_of_val(roster)),
+        max_slots: slot_count,
+        available_slots: slot_count,
+        premium_slots: slot_count,
+    });
+    let count: [u8; 6] = encode_fixed(&RosterPageCount {
+        opcode: 0x09a0,
+        pages: 1,
+    });
+    let blocked: [u8; 4] = encode_fixed(&VariableHeader::new(0x020d, 4));
+    let pin: [u8; 12] = encode_fixed(&PinState {
+        opcode: 0x08b9,
+        seed: 0,
+        account,
+        state: 0,
+    });
 
     let mut reply = account.to_le_bytes().to_vec();
     reply.extend(slots);
     reply.extend(list);
     reply.extend(roster.iter().flatten().copied());
-    reply.extend([0xa0, 0x09, 1, 0, 0, 0]); // one roster request, including an empty roster
-    reply.extend([0x0d, 0x02, 4, 0]); // empty blocked-character list
-    reply.extend([0xb9, 0x08, 0, 0, 0, 0]); // disabled PIN
-    reply.extend(account.to_le_bytes());
-    reply.extend([0, 0]);
+    reply.extend(count);
+    reply.extend(blocked);
+    reply.extend(pin);
     reply
 }
 
 pub fn character_page(roster: &[CharacterRecord]) -> Vec<u8> {
-    let mut reply = variable_header(0x0b72, 4 + std::mem::size_of_val(roster)).to_vec();
+    let header: [u8; 4] = encode_fixed(&VariableHeader::new(
+        0x0b72,
+        4 + std::mem::size_of_val(roster),
+    ));
+    let mut reply = header.to_vec();
     reply.extend(roster.iter().flatten().copied());
     if roster.len() == 3 {
-        reply.extend(variable_header(0x0b72, 4));
+        let terminal: [u8; 4] = encode_fixed(&VariableHeader::new(0x0b72, 4));
+        reply.extend(terminal);
     }
     reply
 }
 
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct CharacterCreated {
+    opcode: u16,
+    record: CharacterRecord,
+}
+
 pub fn character_created(record: &CharacterRecord) -> Vec<u8> {
-    let mut reply = 0x0b6fu16.to_le_bytes().to_vec();
-    reply.extend(record);
-    reply
+    let bytes: [u8; 177] = encode_fixed(&CharacterCreated {
+        opcode: 0x0b6f,
+        record: *record,
+    });
+    bytes.to_vec()
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct ByteResult {
+    opcode: u16,
+    result: u8,
 }
 
 pub fn character_creation_refused(reason: u8) -> [u8; 3] {
-    [0x6e, 0, reason]
+    encode_fixed(&ByteResult {
+        opcode: 0x006e,
+        result: reason,
+    })
 }
 
 pub fn character_selection_refused(owned_slot: bool) -> [u8; 3] {
-    [0xca, 0x02, if owned_slot { 4 } else { 0 }]
+    encode_fixed(&ByteResult {
+        opcode: 0x02ca,
+        result: if owned_slot { 4 } else { 0 },
+    })
 }
+
+#[derive(DekuRead)]
+#[deku(endian = "little")]
 
 pub struct MapEntry {
     pub account: u32,
     pub character: u32,
     pub auth_code: u32,
+    #[deku(pad_bytes_before = "8")]
     pub sex: u8,
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct MapDestination {
+    opcode: u16,
+    character: u32,
+    map: [u8; 16],
+    address: [u8; 4],
+    #[deku(pad_bytes_after = "128")]
+    port: u16,
 }
 
 pub fn map_destination(
@@ -281,14 +440,13 @@ pub fn map_destination(
     map: &[u8],
     endpoint: SocketAddrV4,
 ) -> io::Result<[u8; 156]> {
-    let mut reply = [0; 156];
-    reply[..2].copy_from_slice(&0x0ac5u16.to_le_bytes());
-    reply[2..6].copy_from_slice(&character.to_le_bytes());
-    // Match rAthena's extended map name, including ".gat" and NUL padding.
-    write_field(&mut reply[6..22], map, "map name")?;
-    reply[22..26].copy_from_slice(&endpoint.ip().octets());
-    reply[26..28].copy_from_slice(&endpoint.port().to_le_bytes());
-    Ok(reply)
+    Ok(encode_fixed(&MapDestination {
+        opcode: 0x0ac5,
+        character,
+        map: padded_field(map, "map name")?,
+        address: endpoint.ip().octets(),
+        port: endpoint.port(),
+    }))
 }
 
 pub fn read_map_entry(reader: &mut impl Read) -> io::Result<MapEntry> {
@@ -296,37 +454,70 @@ pub fn read_map_entry(reader: &mut impl Read) -> io::Result<MapEntry> {
     if id != 0x0436 {
         return Err(unsupported("map entry", id));
     }
-    let mut body = [0; 21];
-    reader.read_exact(&mut body)?;
-    Ok(MapEntry {
-        account: u32::from_le_bytes(body[..4].try_into().unwrap()),
-        character: u32::from_le_bytes(body[4..8].try_into().unwrap()),
-        auth_code: u32::from_le_bytes(body[8..12].try_into().unwrap()),
-        sex: body[20],
-    })
+    decode_body::<_, 21>(reader)
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct MapAccountAck {
+    opcode: u16,
+    account: u32,
 }
 
 pub fn map_account_ack(account: u32) -> [u8; 6] {
-    let mut reply = [0; 6];
-    reply[..2].copy_from_slice(&0x0283u16.to_le_bytes());
-    reply[2..].copy_from_slice(&account.to_le_bytes());
-    reply
+    encode_fixed(&MapAccountAck {
+        opcode: 0x0283,
+        account,
+    })
 }
 
 pub fn map_entry_refused() -> [u8; 3] {
-    [0x74, 0, 1]
+    encode_fixed(&ByteResult {
+        opcode: 0x0074,
+        result: 1,
+    })
+}
+
+#[derive(DekuRead, DekuWrite)]
+#[deku(endian = "big", bit_order = "msb")]
+struct MapPosition {
+    #[deku(bits = "10")]
+    x: u16,
+    #[deku(bits = "10")]
+    y: u16,
+    /// Facing direction in server replies. Unused by the walk request handler.
+    #[deku(bits = "4")]
+    direction: u8,
+}
+
+#[derive(DekuWrite)]
+struct MapAccepted {
+    #[deku(endian = "little")]
+    opcode: u16,
+    #[deku(endian = "little")]
+    tick: u32,
+    position: MapPosition,
+    sight_width: u8,
+    #[deku(pad_bytes_after = "2")]
+    sight_height: u8,
 }
 
 pub fn map_accepted(tick: u32, x: u16, y: u16, direction: u8) -> [u8; 13] {
     debug_assert!(x < 1024 && y < 1024 && direction < 8);
-    let mut reply = [0; 13];
-    reply[..2].copy_from_slice(&0x02ebu16.to_le_bytes());
-    reply[2..6].copy_from_slice(&tick.to_le_bytes());
-    reply[6] = (x >> 2) as u8;
-    reply[7] = ((x & 3) << 6 | y >> 4) as u8;
-    reply[8] = ((y & 15) << 4) as u8 | direction;
-    reply[9..11].fill(5);
-    reply
+    encode_fixed(&MapAccepted {
+        opcode: 0x02eb,
+        tick,
+        position: MapPosition { x, y, direction },
+        sight_width: 5,
+        sight_height: 5,
+    })
+}
+
+#[derive(DekuRead)]
+#[deku(endian = "little")]
+struct ChangeDirection {
+    head: u16,
+    body: u8,
 }
 
 pub enum MapRequest {
@@ -363,43 +554,81 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
             Ok(MapRequest::Quit)
         }
         0x0361 => {
-            let mut fields = [0; 3];
-            reader.read_exact(&mut fields)?;
-            Ok(MapRequest::Face {
-                head: u16::from_le_bytes([fields[0], fields[1]]),
-                body: fields[2],
-            })
+            let ChangeDirection { head, body } = decode_body::<_, 3>(reader)?;
+            Ok(MapRequest::Face { head, body })
         }
         0x035f => {
-            let mut position = [0; 3];
-            reader.read_exact(&mut position)?;
-            let [a, b, c] = position.map(u16::from);
-            Ok(MapRequest::Move(
-                (a << 2) | (b >> 6),
-                ((b & 63) << 4) | (c >> 4),
-            ))
+            let position: MapPosition = decode_body::<_, 3>(reader)?;
+            Ok(MapRequest::Move(position.x, position.y))
         }
+
         id => Err(unsupported("map", id)),
     }
 }
 
-pub fn player_move(tick: u32, (x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) -> [u8; 12] {
-    let mut reply = [0; 12];
-    reply[..2].copy_from_slice(&0x0087u16.to_le_bytes());
-    reply[2..6].copy_from_slice(&tick.to_le_bytes());
-    reply[6..].copy_from_slice(&packed_walk((x, y), (dest_x, dest_y)));
-    reply
+pub fn player_move(tick: u32, source: (u16, u16), destination: (u16, u16)) -> [u8; 12] {
+    let packet = NotifyPlayerMove {
+        opcode: NotifyPlayerMove::OPCODE,
+        walk_start_tick: tick,
+        route: WalkRoute::new(source, destination),
+    };
+    encode_fixed(&packet)
 }
 
-fn packed_walk((x, y): (u16, u16), (dest_x, dest_y): (u16, u16)) -> [u8; 6] {
-    [
-        (x >> 2) as u8,
-        (((x & 3) << 6) | (y >> 4)) as u8,
-        (((y & 15) << 4) | (dest_x >> 6)) as u8,
-        (((dest_x & 63) << 2) | (dest_y >> 8)) as u8,
-        dest_y as u8,
-        0x88,
-    ]
+#[derive(DekuWrite)]
+struct NotifyPlayerMove {
+    #[deku(endian = "little")]
+    opcode: u16,
+    #[deku(endian = "little")]
+    walk_start_tick: u32,
+    route: WalkRoute,
+}
+
+impl NotifyPlayerMove {
+    const OPCODE: u16 = 0x0087;
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "big", bit_order = "msb")]
+struct WalkRoute {
+    #[deku(bits = "10")]
+    source_x: u16,
+    #[deku(bits = "10")]
+    source_y: u16,
+    #[deku(bits = "10")]
+    destination_x: u16,
+    #[deku(bits = "10")]
+    destination_y: u16,
+    #[deku(bits = "4")]
+    sub_tile_x: u8,
+    #[deku(bits = "4")]
+    sub_tile_y: u8,
+}
+
+impl WalkRoute {
+    fn new((source_x, source_y): (u16, u16), (destination_x, destination_y): (u16, u16)) -> Self {
+        const SUB_TILE_CENTER: u8 = 8;
+
+        Self {
+            source_x,
+            source_y,
+            destination_x,
+            destination_y,
+            sub_tile_x: SUB_TILE_CENTER,
+            sub_tile_y: SUB_TILE_CENTER,
+        }
+    }
+}
+
+fn encode_fixed<const N: usize>(packet: &impl DekuWriter<()>) -> [u8; N] {
+    let mut bytes = [0; N];
+    let mut cursor = Cursor::new(bytes.as_mut_slice());
+    // Packet fields are bounded before encoding, including coordinates and strings.
+    packet
+        .to_writer(&mut Writer::new(&mut cursor), ())
+        .expect("valid fixed-size packet");
+    debug_assert_eq!(cursor.position(), N as u64);
+    bytes
 }
 
 pub struct PlayerAppearance {
@@ -412,11 +641,82 @@ pub struct PlayerAppearance {
     pub sex: u8,
 }
 
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct PlayerFacing {
+    opcode: u16,
+    account: u32,
+    head: u16,
+    body: u8,
+}
+
 pub fn player_facing(account: u32, head: u16, body: u8) -> [u8; 9] {
-    let mut packet = [0x9c, 0, 0, 0, 0, 0, 0, 0, body];
-    packet[2..6].copy_from_slice(&account.to_le_bytes());
-    packet[6..8].copy_from_slice(&head.to_le_bytes());
-    packet
+    encode_fixed(&PlayerFacing {
+        opcode: 0x009c,
+        account,
+        head,
+        body,
+    })
+}
+
+#[derive(DekuWrite)]
+struct ActorEntryHeader {
+    header: VariableHeader,
+    #[deku(endian = "little", pad_bytes_before = "1")]
+    account: u32,
+    #[deku(endian = "little")]
+    character: u32,
+    #[deku(endian = "little", pad_bytes_after = "8")]
+    walk_speed: u16,
+    #[deku(endian = "little")]
+    job: i16,
+    #[deku(endian = "little")]
+    hair: i16,
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct ActorEntryLook {
+    #[deku(pad_bytes_after = "2")]
+    hair_color: i16,
+    #[deku(pad_bytes_after = "15")]
+    head_direction: u16,
+    sex: u8,
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct ActorEntryTail {
+    #[deku(pad_bytes_after = "2")]
+    level: i16,
+    max_hp: i32,
+    #[deku(pad_bytes_after = "3")]
+    hp: i32,
+    name: [u8; 24],
+}
+
+#[derive(DekuWrite)]
+struct StationaryActor {
+    header: ActorEntryHeader,
+    #[deku(pad_bytes_before = "14")]
+    look: ActorEntryLook,
+    position: MapPosition,
+    width: u8,
+    height: u8,
+    state: u8,
+    tail: ActorEntryTail,
+}
+
+#[derive(DekuWrite)]
+struct MovingActor {
+    header: ActorEntryHeader,
+    #[deku(endian = "little", pad_bytes_before = "10", pad_bytes_after = "4")]
+    walk_start_tick: u32,
+    look: ActorEntryLook,
+    route: WalkRoute,
+    width: u8,
+    height: u8,
+    tail: ActorEntryTail,
 }
 
 pub fn visible_player(
@@ -426,60 +726,100 @@ pub fn visible_player(
     head_direction: u16,
     walk: Option<(u32, (u16, u16))>,
 ) -> Vec<u8> {
-    let (opcode, name_offset, palette_offset, sex_offset) = if walk.is_some() {
-        (0x09fd, 0x5a, 0x2d, 0x42)
-    } else {
-        (0x09ff, 0x54, 0x29, 0x3e)
+    let header = |opcode, length| ActorEntryHeader {
+        header: VariableHeader::new(opcode, length),
+        account: actor.account,
+        character: actor.character,
+        walk_speed: crate::terrain::WALK_MILLIS as u16,
+        job: actor.job,
+        hair: actor.hair,
     };
-    let mut reply = vec![0; name_offset + 24];
-    let header = variable_header(opcode, reply.len());
-    reply[..4].copy_from_slice(&header);
-    reply[5..9].copy_from_slice(&actor.account.to_le_bytes());
-    reply[9..13].copy_from_slice(&actor.character.to_le_bytes());
-    reply[13..15].copy_from_slice(&(crate::terrain::WALK_MILLIS as u16).to_le_bytes());
-    reply[0x17..0x19].copy_from_slice(&actor.job.to_le_bytes());
-    reply[0x19..0x1b].copy_from_slice(&actor.hair.to_le_bytes());
-    reply[palette_offset..palette_offset + 2].copy_from_slice(&actor.hair_color.to_le_bytes());
-    reply[palette_offset + 4..palette_offset + 6].copy_from_slice(&head_direction.to_le_bytes());
-    reply[sex_offset] = actor.sex;
-    let level_offset = if let Some((tick, destination)) = walk {
-        reply[0x25..0x29].copy_from_slice(&tick.to_le_bytes());
-        reply[0x43..0x49].copy_from_slice(&packed_walk((x, y), destination));
-        reply[0x49..0x4b].fill(5);
-        0x4b
-    } else {
-        reply[0x3f..0x42].copy_from_slice(&[
-            (x >> 2) as u8,
-            (((x & 3) << 6) | (y >> 4)) as u8,
-            ((y & 15) << 4) as u8 | direction,
-        ]);
-        reply[0x42..0x44].fill(5);
-        0x45
+    let look = ActorEntryLook {
+        hair_color: actor.hair_color,
+        head_direction,
+        sex: actor.sex,
     };
-    reply[level_offset] = 1;
-    reply[level_offset + 4..level_offset + 12].fill(0xff);
+    let mut name = [0; 24];
     let name_len = actor.name.len().min(23);
-    reply[name_offset..name_offset + name_len].copy_from_slice(&actor.name.as_bytes()[..name_len]);
-    reply
+    name[..name_len].copy_from_slice(&actor.name.as_bytes()[..name_len]);
+
+    let tail = ActorEntryTail {
+        level: 1,
+        max_hp: -1,
+        hp: -1,
+        name,
+    };
+
+    if let Some((tick, destination)) = walk {
+        let bytes: [u8; 114] = encode_fixed(&MovingActor {
+            header: header(0x09fd, 114),
+            walk_start_tick: tick,
+            look,
+            route: WalkRoute::new((x, y), destination),
+            width: 5,
+            height: 5,
+            tail,
+        });
+        bytes.to_vec()
+    } else {
+        let bytes: [u8; 108] = encode_fixed(&StationaryActor {
+            header: header(0x09ff, 108),
+            look,
+            position: MapPosition { x, y, direction },
+            width: 5,
+            height: 5,
+            state: 0,
+            tail,
+        });
+        bytes.to_vec()
+    }
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct PlayerVanished {
+    opcode: u16,
+    account: u32,
+    reason: u8,
 }
 
 pub fn player_vanished(account: u32) -> Vec<u8> {
-    let mut reply = vec![0x80, 0, 0, 0, 0, 0, 0];
-    reply[2..6].copy_from_slice(&account.to_le_bytes());
-    reply
+    let bytes: [u8; 7] = encode_fixed(&PlayerVanished {
+        opcode: 0x0080,
+        account,
+        reason: 0,
+    });
+    bytes.to_vec()
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct MapTime {
+    opcode: u16,
+    tick: u32,
 }
 
 pub fn map_time(tick: u32) -> [u8; 6] {
-    let mut reply = [0; 6];
-    reply[..2].copy_from_slice(&0x007fu16.to_le_bytes());
-    reply[2..].copy_from_slice(&tick.to_le_bytes());
-    reply
+    encode_fixed(&MapTime {
+        opcode: 0x007f,
+        tick,
+    })
+}
+
+#[derive(DekuWrite)]
+#[deku(endian = "little")]
+struct MapQuitAck {
+    opcode: u16,
+    result: u16,
 }
 
 pub const MAP_RETURN_TO_CHARACTER_SELECT: [u8; 3] = [0xb3, 0, 1];
 
 pub fn map_quit_ack(allowed: bool) -> [u8; 4] {
-    [0x8b, 0x01, u8::from(!allowed), 0]
+    encode_fixed(&MapQuitAck {
+        opcode: 0x018b,
+        result: u16::from(!allowed),
+    })
 }
 
 pub const MAP_LOAD_CONFIRMED: [u8; 2] = 0x0b1bu16.to_le_bytes();
@@ -488,6 +828,32 @@ pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_preamble_preserves_frame_alignment_and_truncation() {
+        let mut frames = vec![0x04, 0x02];
+        frames.extend([0xaa; 16]);
+        frames.extend([0x64, 0, 1, 2, 3, 4]);
+        frames.extend(padded_field::<24>(b"TestAccount", "username").unwrap());
+        frames.extend(padded_field::<24>(b"test-password", "password").unwrap());
+        frames.push(7);
+        let login_len = frames.len();
+        frames.extend([0x1c, 0x0b]);
+
+        let mut reader = frames.as_slice();
+        let login = read_login(&mut reader).unwrap();
+        assert_eq!(login.username(), b"TestAccount");
+        assert_eq!(login.password(), b"test-password");
+        assert!(matches!(
+            read_map_request(&mut reader).unwrap(),
+            MapRequest::Ping
+        ));
+
+        for len in 0..login_len {
+            let error = read_login(&mut &frames[..len]).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        }
+    }
 
     #[test]
     fn facing_request_and_reply_match_client_layout() {
@@ -572,6 +938,31 @@ mod tests {
             player_move(0x12345678, (156, 191), (157, 191)),
             [0x87, 0, 0x78, 0x56, 0x34, 0x12, 0x27, 0x0b, 0xf2, 0x74, 0xbf, 0x88]
         );
+    }
+
+    #[test]
+    fn self_move_and_moving_actor_encode_high_coordinate_bits() {
+        let tick = 0x12345678;
+        let source = (1023, 512);
+        let destination = (768, 1023);
+        assert_eq!(
+            player_move(tick, source, destination),
+            [0x87, 0, 0x78, 0x56, 0x34, 0x12, 0xff, 0xe0, 0x0c, 0x03, 0xff, 0x88]
+        );
+
+        let actor = PlayerAppearance {
+            account: 1,
+            character: 2,
+            name: "Walker".into(),
+            job: 0,
+            hair: 0,
+            hair_color: 0,
+            sex: 0,
+        };
+        let packet = visible_player(&actor, source, 0, 0, Some((tick, destination)));
+        assert_eq!(&packet[..4], &[0xfd, 0x09, 0x72, 0]);
+        assert_eq!(&packet[0x25..0x29], &[0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(&packet[0x43..0x49], &[0xff, 0xe0, 0x0c, 0x03, 0xff, 0x88]);
     }
 
     #[test]
