@@ -64,6 +64,16 @@ The map owner answers a loaded requester for itself or a visible loaded player. 
 
 [Issue #17](https://github.com/hanar3/rust-athena/issues/17) · [rAthena active packet table](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif_shuffle.hpp#L4742) · [rAthena player reply](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L9928) · [Rodecomp name-card handler](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameModeHandlers.cpp#L1861)
 
+## Nearby chat
+
+Rodecomp’s ordinary chat send path uses `00f3`, registered as variable-length under the legacy name `ID_CZ_MOVE_ITEM_FROM_BODY_TO_STORE`. The request carries a little-endian length that includes the four-byte header, then the unterminated byte string `name : message`. The pinned rAthena table also registers `00f3` for chat after earlier registrations for other uses. Match the active client send path when choosing the request opcode.
+
+The server accepts up to 360 line bytes, matching Rodecomp’s receive limit of 361 bytes including the terminating NUL. It validates the name prefix against the loaded character and preserves text bytes, including any inline charset prefix. A valid line is echoed to the speaker with `008e` and sent to visible peers with `008d` and the speaker’s four-byte actor ID. Well-framed lines with an empty message, an embedded NUL, or a mismatched name are ignored. An invalid frame length ends the connection.
+
+Codec and two-client TCP checks passed, including pre-load chat, spoof refusal, and a peer walking out of view. Live Rodecomp verification is pending. In Prontera, send a line while a second player is in view and check that each sees it once. Move the peer out of view and send a second line. Only the speaker should see it.
+
+[Issue #19](https://github.com/hanar3/rust-athena/issues/19) · [Rodecomp send path](https://github.com/rodecomp/rodecomp/blob/ce6d40783aa3a98043a232c28678ae32f9368dd5/Source/Client/Mode/GameMode.cpp#L2658) · [rAthena packet table](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif_packetdb.hpp#L497) · [rAthena chat replies](https://github.com/rathena/rathena/blob/226bd83d39584bc91b6bf133f40bce95aa1f178c/src/map/clif.cpp#L11511)
+
 ## Map quit
 
 | Exchange | Client request | Server reply | Behavior and evidence |
