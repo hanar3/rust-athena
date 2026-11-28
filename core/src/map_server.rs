@@ -201,6 +201,7 @@ fn run_session(
             wire::MapRequest::Quit => session.send(wire::map_quit_ack(false))?,
             wire::MapRequest::Face { head, body } => session.face(head, body)?,
             wire::MapRequest::ActorName(actor) => session.lookup_actor_name(actor)?,
+            wire::MapRequest::NearbyChat(line) => session.nearby_chat(line)?,
             wire::MapRequest::Move(x, y) => {
                 let destination = (x, y);
                 if let Some(position) = session.begin_walk(destination)? {

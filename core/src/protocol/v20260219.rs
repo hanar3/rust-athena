@@ -526,6 +526,21 @@ struct ActorNameRequest {
     actor: u32,
 }
 
+// Rodecomp accepts up to 361 reply bytes, including the terminating NUL.
+const MAX_CHAT_LINE: usize = 360;
+
+fn read_chat_line(reader: &mut impl Read) -> io::Result<MapRequest> {
+    let mut length = [0; 2];
+    reader.read_exact(&mut length)?;
+    let length = usize::from(u16::from_le_bytes(length));
+    if !(4..=4 + MAX_CHAT_LINE).contains(&length) {
+        return Err(invalid_data("invalid nearby chat packet length"));
+    }
+    let mut line = vec![0; length - 4];
+    reader.read_exact(&mut line)?;
+    Ok(MapRequest::NearbyChat(line))
+}
+
 pub enum MapRequest {
     Loaded,
     SyncTime,
@@ -537,12 +552,14 @@ pub enum MapRequest {
     Restart(u8),
     Face { head: u16, body: u8 },
     ActorName(u32),
+    NearbyChat(Vec<u8>),
     Move(u16, u16),
 }
 
 pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
     match read_id(reader)? {
         0x007d => Ok(MapRequest::Loaded),
+        0x00f3 => read_chat_line(reader),
         0x0360 => {
             reader.read_exact(&mut [0; 4])?;
             Ok(MapRequest::SyncTime)
@@ -575,6 +592,34 @@ pub fn read_map_request(reader: &mut impl Read) -> io::Result<MapRequest> {
 
         id => Err(unsupported("map", id)),
     }
+}
+
+#[derive(DekuWrite)]
+struct NearbyChatHeader {
+    header: VariableHeader,
+    #[deku(endian = "little")]
+    actor: u32,
+}
+
+pub fn nearby_chat(actor: u32, line: &[u8]) -> Vec<u8> {
+    let header: [u8; 8] = encode_fixed(&NearbyChatHeader {
+        header: VariableHeader::new(0x008d, 8 + line.len() + 1),
+        actor,
+    });
+    chat_packet(&header, line)
+}
+
+pub fn nearby_chat_echo(line: &[u8]) -> Vec<u8> {
+    let header: [u8; 4] = encode_fixed(&VariableHeader::new(0x008e, 4 + line.len() + 1));
+    chat_packet(&header, line)
+}
+
+fn chat_packet(header: &[u8], line: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(header.len() + line.len() + 1);
+    packet.extend_from_slice(header);
+    packet.extend_from_slice(line);
+    packet.push(0);
+    packet
 }
 
 pub fn player_move(tick: u32, source: (u16, u16), destination: (u16, u16)) -> [u8; 12] {
@@ -868,6 +913,42 @@ pub const MAP_PONG: [u8; 2] = 0x0b1du16.to_le_bytes();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearby_chat_framing_preserves_text_bytes_and_following_packets() {
+        let line = b"Walker : |80\x81\x40";
+        let mut frame = vec![0xf3, 0, (4 + line.len()) as u8, 0];
+        frame.extend(line);
+        frame.extend([0x1c, 0x0b]);
+
+        let mut frames = frame.as_slice();
+        assert!(matches!(
+            read_map_request(&mut frames).unwrap(),
+            MapRequest::NearbyChat(bytes) if bytes == line
+        ));
+        assert!(matches!(
+            read_map_request(&mut frames).unwrap(),
+            MapRequest::Ping
+        ));
+
+        for length in [3u16, 365] {
+            let [lo, hi] = length.to_le_bytes();
+            let error = read_map_request(&mut &[0xf3, 0, lo, hi][..]).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let error = read_map_request(&mut &[0xf3, 0, 6, 0, b'a'][..])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            nearby_chat(0x12345678, b"Walker : hi"),
+            b"\x8d\x00\x14\x00\x78\x56\x34\x12Walker : hi\x00"
+        );
+        assert_eq!(
+            nearby_chat_echo(b"Walker : hi"),
+            b"\x8e\x00\x10\x00Walker : hi\x00"
+        );
+    }
 
     #[test]
     fn actor_name_lookup_decodes_one_frame() {

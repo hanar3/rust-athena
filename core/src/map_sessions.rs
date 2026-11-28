@@ -27,6 +27,7 @@ enum Command {
     Walk(u32, Tile, SyncSender<Option<Tile>>),
     Face(u32, u16, u8),
     LookupActorName(u32, u32),
+    NearbyChat(u32, Vec<u8>),
     Reply(u32, Vec<u8>),
     Disconnect(u32, Option<SyncSender<Option<PacketSender>>>),
 }
@@ -237,6 +238,10 @@ fn run(commands: Receiver<Command>, started: Instant, terrain: Option<Terrain>) 
                 state.advance(now, tick(now));
                 state.lookup_actor_name(account, actor);
             }
+            Command::NearbyChat(account, line) => {
+                state.advance(now, tick(now));
+                state.nearby_chat(account, &line);
+            }
             Command::Reply(account, packet) => {
                 if let Some(player) = state.players.get_mut(&account) {
                     player.send(packet);
@@ -302,6 +307,10 @@ impl Session<'_> {
 
     pub fn lookup_actor_name(&self, actor: u32) -> io::Result<()> {
         self.map.send(Command::LookupActorName(self.account, actor))
+    }
+
+    pub fn nearby_chat(&self, line: Vec<u8>) -> io::Result<()> {
+        self.map.send(Command::NearbyChat(self.account, line))
     }
 
     pub fn begin_walk(&self, target: Tile) -> io::Result<Option<Tile>> {
@@ -412,6 +421,28 @@ impl MapState {
         }
     }
 
+    fn nearby_chat(&mut self, account: u32, line: &[u8]) {
+        let Some(speaker) = self
+            .players
+            .get_mut(&account)
+            .filter(|player| player.loaded)
+        else {
+            return;
+        };
+        // The wire line starts with the character name. Verify it against the map session.
+        let Some(message) = line
+            .strip_prefix(speaker.appearance.name.as_bytes())
+            .and_then(|rest| rest.strip_prefix(b" : "))
+        else {
+            return;
+        };
+        if message.is_empty() || message.contains(&0) {
+            return;
+        }
+        speaker.send(wire::nearby_chat_echo(line));
+        self.send_to_observers(account, wire::nearby_chat(account, line));
+    }
+
     fn send_to_observers(&mut self, account: u32, packet: Vec<u8>) {
         let MapState { visible, players } = self;
         for &(left, right) in visible.iter() {
@@ -459,6 +490,50 @@ mod tests {
         assert_eq!(&packet[..2], &opcode.to_le_bytes());
         assert_eq!(&packet[offset..offset + 4], &account.to_le_bytes());
         packet
+    }
+
+    #[test]
+    fn nearby_chat_echoes_and_reaches_only_visible_loaded_peers() {
+        let now = Instant::now();
+        let mut map = MapState::default();
+        let speaker = open(&mut map, 7, (156, 191));
+        let nearby = open(&mut map, 8, (170, 191));
+        let unloaded = open(&mut map, 9, (156, 191));
+        map.nearby_chat(7, b"Player7 : hello");
+        assert!(speaker.try_recv().is_err());
+
+        assert!(map.loaded(7, now, 0));
+        assert!(map.loaded(8, now, 0));
+        assert_eq!(speaker.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        assert_eq!(nearby.try_recv().unwrap(), wire::MAP_LOAD_CONFIRMED);
+        packet(&speaker, 0x09ff, 8, 5);
+        packet(&nearby, 0x09ff, 7, 5);
+
+        for invalid in [
+            b"Player8 : spoof".as_slice(),
+            b"Player7 : ",
+            b"Player7 : hidden\0tail",
+        ] {
+            map.nearby_chat(7, invalid);
+        }
+        assert!(speaker.try_recv().is_err());
+        assert!(nearby.try_recv().is_err());
+
+        let line = b"Player7 : hello";
+        map.nearby_chat(7, line);
+        assert_eq!(speaker.try_recv().unwrap(), wire::nearby_chat_echo(line));
+        assert_eq!(nearby.try_recv().unwrap(), wire::nearby_chat(7, line));
+        assert!(speaker.try_recv().is_err());
+        assert!(nearby.try_recv().is_err());
+        assert!(unloaded.try_recv().is_err());
+
+        map.players.get_mut(&8).unwrap().tile = (171, 191);
+        map.refresh_visibility(0);
+        packet(&speaker, 0x0080, 8, 2);
+        packet(&nearby, 0x0080, 7, 2);
+        map.nearby_chat(7, line);
+        assert_eq!(speaker.try_recv().unwrap(), wire::nearby_chat_echo(line));
+        assert!(nearby.try_recv().is_err());
     }
 
     #[test]
